@@ -1,0 +1,6 @@
+.codex
+__pycache__/
+.venv/
+datasets/
+wandb/
+outputs/

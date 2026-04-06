@@ -1,0 +1,19 @@
+type: pixels
+keep_modality_embeddings: False
+
+modalities:
+  pixels:
+    enabled: True
+    source: pixels
+    encoder_type: vit
+    preprocess: imagenet
+    encoder_scale: ${encoder_scale}
+    patch_size: ${patch_size}
+    img_size: ${img_size}
+    output_dim: ${wm.embed_dim}
+    pretrained: False
+    projector_hidden_dim: 2048
+
+fusion:
+  type: identity
+  output_dim: ${wm.embed_dim}

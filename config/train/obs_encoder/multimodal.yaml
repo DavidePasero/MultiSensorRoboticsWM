@@ -1,0 +1,46 @@
+type: multimodal
+keep_modality_embeddings: False
+
+modalities:
+  pixels:
+    enabled: True
+    source: pixels
+    encoder_type: vit
+    preprocess: imagenet
+    encoder_scale: ${encoder_scale}
+    patch_size: ${patch_size}
+    img_size: ${img_size}
+    output_dim: 128
+    pretrained: False
+    projector_hidden_dim: 2048
+
+  depth:
+    enabled: True
+    source: depth
+    encoder_type: cnn
+    img_size: ${img_size}
+    output_dim: 64
+    hidden_dims: [32, 64, 128]
+    preprocess: generic
+
+  tactile:
+    enabled: True
+    source: tactile
+    encoder_type: cnn
+    img_size: 64
+    output_dim: 64
+    hidden_dims: [32, 64, 128]
+    preprocess: generic
+
+  proprio:
+    enabled: True
+    source: proprio
+    encoder_type: mlp
+    output_dim: 32
+    hidden_dims: [128, 128]
+
+fusion:
+  type: concat_project
+  output_dim: ${wm.embed_dim}
+  hidden_dim: 512
+  dropout: 0.0
