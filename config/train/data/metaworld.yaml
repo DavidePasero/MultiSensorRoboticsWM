@@ -1,4 +1,5 @@
 dataset:
+  type: metaworld
   name: metaworld
   num_steps: ${eval:'${wm.num_preds} + ${wm.history_size}'}
   frameskip: 1
@@ -7,7 +8,9 @@ dataset:
     - depth
     - tactile
     - proprio
+    - force_torque
     - action
   keys_to_cache:
     - action
     - proprio
+    - force_torque

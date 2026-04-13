@@ -1,4 +1,8 @@
+"""
+STABLEWM_HOME=~/.stable_worldmodel python train.py data=metaworld obs_encoder=multimodal
+"""
 import os
+import sys
 from functools import partial
 from pathlib import Path
 
@@ -8,17 +12,13 @@ import stable_pretraining as spt
 import stable_worldmodel as swm
 import torch
 from lightning.pytorch.loggers import WandbLogger
-from omegaconf import OmegaConf, open_dict
+from omegaconf import OmegaConf
 
+from datasets_utils.dataset_factory import get_dataset_adapter_from_config
 from jepa import JEPA
 from module import ARPredictor, Embedder, MLP, SIGReg
-from multimodal import build_obs_encoder, get_image_modality_configs
-from utils import (
-    ModelObjectCallBack,
-    get_column_normalizer,
-    get_image_like_preprocessor,
-    get_img_preprocessor,
-)
+from multimodal import build_obs_encoder
+from utils import ModelObjectCallBack
 
 
 def lejepa_forward(self, batch, stage, cfg):
@@ -57,46 +57,9 @@ def run(cfg):
     ##       dataset       ##
     #########################
 
-    dataset = swm.data.HDF5Dataset(**cfg.data.dataset, transform=None)
-    transforms = []
-    image_sources = set()
-
-    for _, mod_cfg in get_image_modality_configs(cfg.obs_encoder).items():
-        source = mod_cfg.get("source")
-        if source in image_sources:
-            continue
-
-        preprocess = mod_cfg.get("preprocess", "imagenet" if source == "pixels" else "generic")
-        img_size = mod_cfg.get("img_size", cfg.img_size)
-        if preprocess == "imagenet":
-            transforms.append(get_img_preprocessor(source=source, target=source, img_size=img_size))
-        elif preprocess == "generic":
-            transforms.append(
-                get_image_like_preprocessor(
-                    source=source,
-                    target=source,
-                    img_size=img_size,
-                    mean=mod_cfg.get("mean"),
-                    std=mod_cfg.get("std"),
-                )
-            )
-        else:
-            raise ValueError(f"Unsupported preprocess type '{preprocess}' for source '{source}'.")
-
-        image_sources.add(source)
-    
-    with open_dict(cfg):
-        for col in cfg.data.dataset.keys_to_load:
-            if col in image_sources:
-                continue
-
-            normalizer = get_column_normalizer(dataset, col, col)
-            transforms.append(normalizer)
-
-            setattr(cfg.wm, f"{col}_dim", dataset.get_dim(col))
-
-    transform = spt.data.transforms.Compose(*transforms)
-    dataset.transform = transform
+    dataset_adapter = get_dataset_adapter_from_config(cfg)
+    dataset, keys_to_load = dataset_adapter.build_dataset(cfg)
+    dataset_adapter.populate_wm_dims(cfg, dataset, keys_to_load)
 
     rnd_gen = torch.Generator().manual_seed(cfg.seed)
     train_set, val_set = spt.data.random_split(

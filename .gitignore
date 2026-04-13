@@ -1,6 +1,11 @@
 .codex
 __pycache__/
 .venv/
-datasets/
+data/
 wandb/
 outputs/
+
+*.txt
+*.json
+
+le-thesis/

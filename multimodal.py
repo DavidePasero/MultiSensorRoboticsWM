@@ -10,7 +10,13 @@ from module import MLP
 
 
 IMAGE_ENCODER_TYPES = {"vit", "cnn"}
+VECTOR_ENCODER_TYPES = {"mlp"}
 IMAGE_CHANNEL_COUNTS = (1, 2, 3, 4)
+DEFAULT_MODALITY_CHANNELS = {
+    "pixels": 3,
+    "depth": 1,
+    "tactile": 2,
+}
 
 
 def get_enabled_modality_configs(obs_cfg):
@@ -26,6 +32,14 @@ def get_image_modality_configs(obs_cfg):
         (name, mod_cfg)
         for name, mod_cfg in get_enabled_modality_configs(obs_cfg).items()
         if mod_cfg.encoder_type in IMAGE_ENCODER_TYPES
+    )
+
+
+def get_vector_modality_configs(obs_cfg):
+    return OrderedDict(
+        (name, mod_cfg)
+        for name, mod_cfg in get_enabled_modality_configs(obs_cfg).items()
+        if mod_cfg.encoder_type in VECTOR_ENCODER_TYPES
     )
 
 
@@ -108,6 +122,7 @@ class CNNImageEncoder(BaseModalityEncoder):
         self,
         *,
         source,
+        in_channels,
         output_dim,
         hidden_dims=(32, 64, 128),
         head_hidden_dim=None,
@@ -116,9 +131,19 @@ class CNNImageEncoder(BaseModalityEncoder):
         hidden_dims = list(hidden_dims)
         if not hidden_dims:
             raise ValueError("CNNImageEncoder requires at least one hidden dimension.")
+        if in_channels is None:
+            raise ValueError(
+                f"Missing in_channels for CNN image modality '{source}'."
+            )
 
         layers = [
-            nn.LazyConv2d(hidden_dims[0], kernel_size=5, stride=2, padding=2),
+            nn.Conv2d(
+                in_channels,
+                hidden_dims[0],
+                kernel_size=5,
+                stride=2,
+                padding=2,
+            ),
             nn.GELU(),
         ]
         for in_dim, out_dim in zip(hidden_dims, hidden_dims[1:]):
@@ -226,8 +251,13 @@ def build_modality_encoder(cfg, name, mod_cfg):
         )
 
     if encoder_type == "cnn":
+        in_channels = mod_cfg.get("in_channels")
+        if in_channels is None:
+            in_channels = DEFAULT_MODALITY_CHANNELS.get(source)
+
         return CNNImageEncoder(
             source=source,
+            in_channels=in_channels,
             output_dim=output_dim,
             hidden_dims=mod_cfg.get("hidden_dims", (32, 64, 128)),
             head_hidden_dim=mod_cfg.get("head_hidden_dim"),

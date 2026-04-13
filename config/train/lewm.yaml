@@ -36,8 +36,8 @@ optimizer:
 wandb:
   enabled: True
   config:
-    entity: lewm
-    project: lewm
+    entity: davide_pasero-university-of-amsterdam
+    project: le-thesis
     name: ${output_model_name}
     id: ${subdir}
     resume: allow

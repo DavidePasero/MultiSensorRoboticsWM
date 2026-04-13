@@ -18,6 +18,7 @@ modalities:
     enabled: True
     source: depth
     encoder_type: cnn
+    in_channels: 1
     img_size: ${img_size}
     output_dim: 64
     hidden_dims: [32, 64, 128]
@@ -27,6 +28,7 @@ modalities:
     enabled: True
     source: tactile
     encoder_type: cnn
+    in_channels: 2
     img_size: 64
     output_dim: 64
     hidden_dims: [32, 64, 128]
@@ -36,6 +38,14 @@ modalities:
     enabled: True
     source: proprio
     encoder_type: mlp
+    output_dim: 32
+    hidden_dims: [128, 128]
+
+  force_torque:
+    enabled: True
+    source: force_torque
+    encoder_type: mlp
+    preprocess: saved_stats
     output_dim: 32
     hidden_dims: [128, 128]
 

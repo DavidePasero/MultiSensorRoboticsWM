@@ -44,7 +44,7 @@ Datasets use the HDF5 format for fast loading. Download the data from [HuggingFa
 tar --zstd -xvf archive.tar.zst
 ```
 
-Place the extracted `.h5` files under `$STABLEWM_HOME` (defaults to `~/.stable-wm/`). You can override this path:
+Place the extracted `.h5` files under `$STABLEWM_HOME` (defaults to `~/.stable_worldmodel/`). You can override this path:
 ```bash
 export STABLEWM_HOME=/path/to/your/storage
 ```
@@ -90,6 +90,7 @@ The current multimodal baseline is configured in `config/train/obs_encoder/multi
 - `depth`: lightweight CNN encoder with generic image preprocessing
 - `tactile`: lightweight CNN encoder with generic image preprocessing
 - `proprio`: MLP encoder with per-dimension normalization
+- `force_torque`: MLP encoder with dataset-wide normalization loaded from saved HDF5 stats
 
 The modality embeddings are concatenated and projected back to `wm.embed_dim` before being passed to the unchanged JEPA predictor. The fusion abstraction is intentionally separate so additional implementations such as cross-attention or MoE can be added later without changing `train.py` or `jepa.py`.
 
@@ -97,16 +98,23 @@ The modality embeddings are concatenated and projected back to `wm.embed_dim` be
 
 The `stable_worldmodel` HDF5 loader expects a flat dataset with root-level arrays such as `pixels`, `action`, `ep_len`, and `ep_offset`. A raw Meta-World collection file produced by per-environment/per-episode groups does not match that format directly.
 
-This repository includes `convert_metaworld_hdf5.py` to convert a hierarchical Meta-World file into the flat format expected by LeWM training. The converter:
+Dataset-specific preprocessing and conversion code now lives under `datasets/`. The training config declares the dataset family through `data.dataset.type`, and the code instantiates the matching dataset adapter automatically.
+
+The current built-in dataset families are:
+- `generic`: flat HDF5 datasets that use the default image preprocessing and per-column z-score normalization
+- `metaworld`: flat HDF5 datasets converted from hierarchical Meta-World rollouts, with saved `force_torque` normalization stats
+
+For Meta-World, the relevant implementation lives under `datasets/metaworld/`. The Meta-World converter:
 - flattens all episodes into root-level arrays
 - writes `ep_len` and `ep_offset` for episode indexing
 - writes `episode_idx` and `step_idx` for bookkeeping
 - merges `gripper` into `proprio` by default
-- preserves `pixels`, `depth`, `tactile`, `proprio`, and `action`
+- preserves `pixels`, `depth`, `tactile`, `proprio`, `force_torque`, and `action`
+- saves dataset-wide normalization statistics for `force_torque` under `stats/force_torque_mean` and `stats/force_torque_std`
 
 Convert a raw dataset with:
 ```bash
-python convert_metaworld_hdf5.py /path/to/raw_metaworld.hdf5 ~/.stable_worldmodel/metaworld.h5
+python datasets/convert_dataset.py metaworld /path/to/raw_metaworld.hdf5 ~/.stable_worldmodel/metaworld.h5
 ```
 
 The corresponding training config is `config/train/data/metaworld.yaml`, which expects the dataset name `metaworld` and uses `frameskip: 1`.
@@ -119,7 +127,7 @@ python train.py data=metaworld obs_encoder=multimodal
 
 If you want to keep `gripper` separate instead of appending it to `proprio`, convert with:
 ```bash
-python convert_metaworld_hdf5.py /path/to/raw_metaworld.hdf5 ~/.stable_worldmodel/metaworld.h5 --keep-gripper-separate
+python datasets/convert_dataset.py metaworld /path/to/raw_metaworld.hdf5 ~/.stable_worldmodel/metaworld.h5 --keep-gripper-separate
 ```
 
 In that case you should also update the multimodal config to add a dedicated encoder branch for `gripper`.
