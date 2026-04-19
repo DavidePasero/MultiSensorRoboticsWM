@@ -222,9 +222,27 @@ class MultiModalObsEncoder(nn.Module):
         self.hidden_dim = hidden_dim
 
     def forward(self, info):
-        modality_embs = OrderedDict(
-            (name, encoder(info)) for name, encoder in self.encoders.items()
-        )
+        modality_embs = OrderedDict()
+        missing = []
+        for name, encoder in self.encoders.items():
+            if encoder.source not in info:
+                missing.append(name)
+                continue
+            modality_embs[name] = encoder(info)
+
+        if not modality_embs:
+            expected = [encoder.source for encoder in self.encoders.values()]
+            raise KeyError(
+                "No observation modalities were available for encoding. "
+                f"Expected one of: {expected}."
+            )
+
+        if missing and not getattr(self.fusion, "supports_missing_modalities", False):
+            raise KeyError(
+                "Missing observation modalities for the selected fusion module: "
+                f"{missing}."
+            )
+
         fused_emb, aux = self.fusion(modality_embs)
 
         output = {"emb": fused_emb}

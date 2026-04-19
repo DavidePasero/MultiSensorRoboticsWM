@@ -94,6 +94,69 @@ The current multimodal baseline is configured in `config/train/obs_encoder/multi
 
 The modality embeddings are concatenated and projected back to `wm.embed_dim` before being passed to the unchanged JEPA predictor. The fusion abstraction is intentionally separate so additional implementations such as cross-attention or MoE can be added later without changing `train.py` or `jepa.py`.
 
+Fusion selection now happens directly through the obs-encoder config. The field:
+
+```yaml
+obs_encoder:
+  fusion:
+    type: ...
+```
+
+currently supports:
+- `concatproject`: concatenate all modality embeddings and project to `wm.embed_dim`
+- `selfattention`: project each modality to a shared token dimension, add learned modality embeddings, prepend a learned state token, run self-attention, and project the state token to `wm.embed_dim`
+
+For `selfattention`, the config also supports training-time random modality masking through:
+
+```yaml
+obs_encoder:
+  fusion:
+    selfattention:
+      training_type: keepall
+      random_mask_prob: 0.0
+```
+
+where:
+- `training_type: keepall` keeps all available modalities during training
+- `training_type: mask` enables random training-time masking
+
+When `training_type: mask`, the fusion module replaces a random subset of modality tokens with a learned mask token during training, while ensuring at least one modality remains available in each sequence. At evaluation time, any modality omitted from the input dict is also replaced by the learned mask token regardless of `training_type`.
+
+The default multimodal config includes both sets of hyperparameters under:
+- `obs_encoder.fusion.concatproject.*`
+- `obs_encoder.fusion.selfattention.*`
+
+This makes it easy to compare the two fusion strategies without changing code. For example:
+
+```bash
+python train.py data=metaworld obs_encoder=multimodal obs_encoder.fusion.type=concatproject
+```
+
+```bash
+python train.py data=metaworld obs_encoder=multimodal obs_encoder.fusion.type=selfattention
+```
+
+```bash
+python train.py data=metaworld obs_encoder=multimodal \
+  obs_encoder.fusion.type=selfattention \
+  obs_encoder.fusion.selfattention.training_type=mask \
+  obs_encoder.fusion.selfattention.random_mask_prob=0.3
+```
+
+If you want to keep runs separate for a fair comparison, give each one its own output directory:
+
+```bash
+python train.py data=metaworld obs_encoder=multimodal \
+  obs_encoder.fusion.type=concatproject \
+  subdir=metaworld_concatproject
+```
+
+```bash
+python train.py data=metaworld obs_encoder=multimodal \
+  obs_encoder.fusion.type=selfattention \
+  subdir=metaworld_selfattention
+```
+
 ## Meta-World Conversion
 
 The `stable_worldmodel` HDF5 loader expects a flat dataset with root-level arrays such as `pixels`, `action`, `ep_len`, and `ep_offset`. A raw Meta-World collection file produced by per-environment/per-episode groups does not match that format directly.

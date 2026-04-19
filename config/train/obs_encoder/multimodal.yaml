@@ -50,7 +50,16 @@ modalities:
     hidden_dims: [128, 128]
 
 fusion:
-  type: concat_project
+  type: concatproject
   output_dim: ${wm.embed_dim}
-  hidden_dim: 512
-  dropout: 0.0
+  concatproject:
+    hidden_dim: 512
+    dropout: 0.0
+  selfattention:
+    model_dim: 128
+    num_heads: 4
+    num_layers: 2
+    mlp_ratio: 4.0
+    dropout: 0.0
+    training_type: keepall
+    random_mask_prob: 0.0
