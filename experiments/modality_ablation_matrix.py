@@ -157,8 +157,17 @@ def corrupt_tensor(x: torch.Tensor, corruption: str) -> torch.Tensor:
     raise ValueError(f"Unsupported corruption: {corruption}")
 
 
+def model_supports_missing_modalities(model) -> bool:
+    encoder = getattr(model, "encoder", None)
+    fusion = getattr(encoder, "fusion", None) if encoder is not None else None
+    return bool(getattr(fusion, "supports_missing_modalities", False))
+
+
 def apply_corruption(batch, modality: str, corruption: str):
     corrupted = copy_batch(batch)
+    if corruption == "remove":
+        corrupted.pop(modality, None)
+        return corrupted
     corrupted[modality] = corrupt_tensor(corrupted[modality], corruption)
     return corrupted
 
@@ -242,11 +251,16 @@ def main():
     model = load_cost_model(args.checkpoint, cache_dir=cache_dir)
     model = model.to(device).eval()
     model.requires_grad_(False)
+    supports_missing_modalities = model_supports_missing_modalities(model)
 
     dataset = build_dataset(cfg, cache_dir)
     modalities = get_modalities(cfg, dataset, args.modalities)
     if not modalities:
         raise ValueError("No modalities available for ablation.")
+
+    corruptions = list(args.corruptions)
+    if supports_missing_modalities and "remove" not in corruptions:
+        corruptions.append("remove")
 
     loader = DataLoader(
         dataset,
@@ -266,7 +280,7 @@ def main():
             batch = batch_to_device(batch, device)
             clean = compute_pred_metrics(model, batch)
 
-            for corruption in args.corruptions:
+            for corruption in corruptions:
                 for modality in modalities:
                     if modality not in batch:
                         continue
@@ -306,7 +320,8 @@ def main():
         "resolved_config": str(config_path),
         "dataset_name": cfg.data.dataset.name,
         "modalities": modalities,
-        "corruptions": args.corruptions,
+        "corruptions": corruptions,
+        "supports_missing_modalities": supports_missing_modalities,
         "num_batches": args.num_batches,
         "batch_size": args.batch_size,
         "device": str(device),
