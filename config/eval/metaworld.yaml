@@ -4,45 +4,57 @@ defaults:
   - _self_
 
 world:
-  env_name: swm/TwoRoom-v1
+  env_name: swm/SensorMetaWorld-v0
   num_envs: ${eval.num_eval}
-  max_episode_steps: ??? # make sure it's >= eval_budget
+  max_episode_steps: ???
   history_size: 1
   frame_skip: 1
-
-seed: 42
-policy: random # ckpt name or random
+  metaworld_env_name: reach-v3
+  randomize_every_reset: true
+  goal_tolerance: 0.05
 
 dataset:
   stats: ${eval.dataset_name}
+  keys_to_load:
+    - pixels
+    - depth
+    - tactile
+    - proprio
+    - force_torque
+    - action
+    - episode_idx
+    - step_idx
+    - env_idx
   keys_to_cache:
     - action
     - proprio
+    - force_torque
+
+seed: 42
+policy: random
 
 plan_config:
-  horizon: 5
+  horizon: 25
   receding_horizon: 5
-  action_block: 5 # frameskip
+  action_block: 1
 
-# evaluation from dataset (replay expert trajectories)
 eval:
-  num_eval: 50
+  num_eval: 10
   goal_offset_steps: 25
   eval_budget: 50
   img_size: 224
+  render_size: 128
   drop_modality: null
-  dataset_name: tworoom
+  dataset_name: metaworld_eval
   callables:
-    # -- set state
     - method: _set_state
       args:
-        state:
+        proprio:
           value: proprio
-    # -- set goal state
     - method: _set_goal_state
       args:
         goal_state:
           value: goal_proprio
 
 output:
-  filename: tworoom_results.txt
+  filename: metaworld_results.txt

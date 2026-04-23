@@ -1,6 +1,14 @@
 """Generic CLI entrypoint that dispatches dataset conversion to the selected adapter."""
 
 import argparse
+from pathlib import Path
+import sys
+
+
+# Allow `python datasets_utils/convert_dataset.py ...` from the repo root by
+# adding the project root to sys.path when this file is executed as a script.
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from datasets_utils.dataset_factory import get_dataset_adapter, get_registered_dataset_types
 
