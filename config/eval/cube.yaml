@@ -37,6 +37,7 @@ eval:
   eval_budget: 50
   img_size: 224
   drop_modality: null
+  drop_modalities: []
   dataset_name: ogbench/cube_single_expert
   callables:
     # -- set state

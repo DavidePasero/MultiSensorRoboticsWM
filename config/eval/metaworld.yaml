@@ -45,6 +45,7 @@ eval:
   img_size: 224
   render_size: 128
   drop_modality: null
+  drop_modalities: []
   dataset_name: metaworld_eval
   callables:
     - method: _set_state

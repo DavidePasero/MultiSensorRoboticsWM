@@ -103,27 +103,31 @@ obs_encoder:
 ```
 
 currently supports:
-- `concatproject`: concatenate all modality embeddings and project to `wm.embed_dim`
+- `concatproject`: project each modality to a shared token dimension, concatenate the projected modality vectors in a fixed order, and project the result to `wm.embed_dim`
 - `selfattention`: project each modality to a shared token dimension, add learned modality embeddings, prepend a learned state token, run self-attention, and project the state token to `wm.embed_dim`
+- `gated`: project each modality to a shared token dimension, compute feature-wise modality gates from per-modality MLPs and a mean-pooled context token, and fuse with a weighted sum before projecting to `wm.embed_dim`
 
-For `selfattention`, the config also supports training-time random modality masking through:
+The shared-space fusion configs support training-time random modality masking through:
 
 ```yaml
 obs_encoder:
   fusion:
+    concatproject:
+      random_mask_prob: 0.0
+    gated:
+      random_mask_prob: 0.0
     selfattention:
-      training_type: keepall
       random_mask_prob: 0.0
 ```
 
-where:
-- `training_type: keepall` keeps all available modalities during training
-- `training_type: mask` enables random training-time masking
-
-When `training_type: mask`, the fusion module replaces a random subset of modality tokens with a learned mask token during training, while ensuring at least one modality remains available in each sequence. At evaluation time, any modality omitted from the input dict is also replaced by the learned mask token regardless of `training_type`.
+Here, `random_mask_prob` is the probability of randomly masking each available
+modality during training. Setting it to `0.0` disables random modality masking.
+Regardless of that value, these fusion modules can still handle truly missing
+modalities at evaluation time by replacing them with a learned mask token.
 
 The default multimodal config includes both sets of hyperparameters under:
 - `obs_encoder.fusion.concatproject.*`
+- `obs_encoder.fusion.gated.*`
 - `obs_encoder.fusion.selfattention.*`
 
 This makes it easy to compare the two fusion strategies without changing code. For example:
@@ -139,7 +143,6 @@ python train.py data=metaworld obs_encoder=multimodal obs_encoder.fusion.type=se
 ```bash
 python train.py data=metaworld obs_encoder=multimodal \
   obs_encoder.fusion.type=selfattention \
-  obs_encoder.fusion.selfattention.training_type=mask \
   obs_encoder.fusion.selfattention.random_mask_prob=0.3
 ```
 
@@ -194,6 +197,74 @@ python datasets_utils/convert_dataset.py metaworld /path/to/raw_metaworld.hdf5 ~
 ```
 
 In that case you should also update the multimodal config to add a dedicated encoder branch for `gripper`.
+
+## Probing Experiments
+
+The repository includes offline latent-space probes under `experiments/` to test what information is linearly or nonlinearly decodable from a frozen checkpoint. The current probe tasks are:
+
+- `ee_position`: regress the end-effector xyz position
+- `contact_no_contact`: classify binary contact from the dataset's `bool_contact` label
+- `object_distance`: regress the distances from the end effector to `object_1` and `object_2`
+
+The main entrypoint is `experiments/probe_experiments.py`. It:
+- loads a trained `*_object.ckpt`
+- rebuilds the dataset and preprocessing from the saved config
+- extracts frozen latent representations
+- trains and evaluates a probe on train/val/test splits
+
+The supported probe types are:
+- `linear`: linear probe
+- `mlp`: nonlinear MLP probe
+- `knn`: non-parametric kNN probe
+
+Run a single probe suite directly with:
+
+```bash
+STABLEWM_HOME=$HOME/.stable_worldmodel python experiments/probe_experiments.py \
+  $HOME/.stable_worldmodel/metaworld_selfattention/lewm_epoch_3_object.ckpt \
+  --experiments contact_no_contact \
+  --probe-type linear \
+  --device cuda
+```
+
+To probe a different representation, override `--representation`. The default is the fused latent:
+
+```bash
+STABLEWM_HOME=$HOME/.stable_worldmodel python experiments/probe_experiments.py \
+  $HOME/.stable_worldmodel/metaworld_selfattention/lewm_epoch_3_object.ckpt \
+  --experiments ee_position \
+  --probe-type mlp \
+  --representation fused \
+  --device cuda
+```
+
+Probe results are written to `experiments/results/` as JSON files unless you override `--output`.
+
+If you want to run all currently supported probe tasks for the same checkpoint in one go, use the launcher in `job_dir/`:
+
+```bash
+job_dir/run_probe_experiments.sh \
+  ~/.stable_worldmodel/metaworld_selfattention/lewm_epoch_3_object.ckpt \
+  linear \
+  --device cuda
+```
+
+The launcher always runs:
+- `ee_position`
+- `contact_no_contact`
+- `object_distance`
+
+and passes any extra arguments through to `experiments/probe_experiments.py`. For example, to run the full suite with a kNN probe:
+
+```bash
+job_dir/run_probe_experiments.sh \
+  ~/.stable_worldmodel/metaworld_selfattention/lewm_epoch_3_object.ckpt \
+  knn \
+  --knn-k 32 \
+  --device cuda
+```
+
+Probe experiments fail fast if the required dataset keys are not present in the converted HDF5 file. For Meta-World, make sure the converted dataset preserves keys such as `bool_contact`, `ee_position`, `object_1_xyz`, and `object_2_xyz`.
 
 ## Planning
 

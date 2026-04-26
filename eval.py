@@ -36,38 +36,76 @@ def get_model_modality_sources(model):
     return sources
 
 
+def normalize_modalities_arg(value):
+    if value is None:
+        return []
+
+    if isinstance(value, str):
+        items = value.split(",")
+    else:
+        items = list(value)
+
+    normalized = []
+    for item in items:
+        if item is None:
+            continue
+        item = str(item).strip()
+        if item == "" or item.lower() == "none":
+            continue
+        if item not in normalized:
+            normalized.append(item)
+    return normalized
+
+
+def get_drop_modalities(eval_cfg):
+    requested = []
+    requested.extend(normalize_modalities_arg(eval_cfg.get("drop_modality", None)))
+    requested.extend(normalize_modalities_arg(eval_cfg.get("drop_modalities", [])))
+
+    drop_modalities = []
+    for modality in requested:
+        if modality not in drop_modalities:
+            drop_modalities.append(modality)
+    return drop_modalities
+
+
 class ModalityDropoutWorldModelPolicy(swm.policy.WorldModelPolicy):
     """World-model policy that removes a modality so missing-modality fusion can mask it."""
 
-    def __init__(self, *args, drop_modality=None, **kwargs):
+    def __init__(self, *args, drop_modalities=None, **kwargs):
         super().__init__(*args, **kwargs)
-        self.drop_modality = None if drop_modality in {None, "", "none"} else str(drop_modality)
+        self.drop_modalities = normalize_modalities_arg(drop_modalities)
 
-    def _resolve_drop_source(self):
-        if self.drop_modality is None:
-            return None
+    def _resolve_drop_sources(self):
+        if not self.drop_modalities:
+            return []
 
         model = getattr(self.solver, "model", None)
         modality_sources = get_model_modality_sources(model)
         if not modality_sources:
-            return self.drop_modality
-
-        if self.drop_modality in modality_sources:
-            return modality_sources[self.drop_modality]
-
-        if self.drop_modality in modality_sources.values():
-            return self.drop_modality
+            return list(self.drop_modalities)
 
         known = sorted(set(modality_sources) | set(modality_sources.values()))
-        raise ValueError(
-            f"Unknown modality '{self.drop_modality}'. Available modalities: {known}."
-        )
+        resolved_sources = []
+        for modality in self.drop_modalities:
+            if modality in modality_sources:
+                source = modality_sources[modality]
+            elif modality in modality_sources.values():
+                source = modality
+            else:
+                raise ValueError(
+                    f"Unknown modality '{modality}'. Available modalities: {known}."
+                )
 
-    def _find_fallback_primary_source(self, info_dict, dropped_source):
+            if source not in resolved_sources:
+                resolved_sources.append(source)
+        return resolved_sources
+
+    def _find_fallback_primary_source(self, info_dict, dropped_sources):
         model = getattr(self.solver, "model", None)
         modality_sources = get_model_modality_sources(model)
         for source in modality_sources.values():
-            if source == dropped_source or source not in info_dict:
+            if source in dropped_sources or source not in info_dict:
                 continue
 
             goal_key = "goal" if source == "pixels" else f"goal_{source}"
@@ -75,28 +113,34 @@ class ModalityDropoutWorldModelPolicy(swm.policy.WorldModelPolicy):
                 return source
         return None
 
-    def _drop_selected_modality(self, info_dict):
-        drop_source = self._resolve_drop_source()
-        if drop_source is None:
+    def _drop_selected_modalities(self, info_dict):
+        drop_sources = self._resolve_drop_sources()
+        if not drop_sources:
             return info_dict, None, None
 
         pruned = dict(info_dict)
-        pruned.pop(drop_source, None)
-        pruned.pop("goal" if drop_source == "pixels" else f"goal_{drop_source}", None)
+        for drop_source in drop_sources:
+            pruned.pop(drop_source, None)
+            pruned.pop(
+                "goal" if drop_source == "pixels" else f"goal_{drop_source}",
+                None,
+            )
 
         model = getattr(self.solver, "model", None)
         encoder = getattr(model, "encoder", None)
         original_primary_source = getattr(encoder, "primary_source", None)
 
-        if encoder is not None and original_primary_source == drop_source:
-            fallback_source = self._find_fallback_primary_source(pruned, drop_source)
+        if encoder is not None and original_primary_source in drop_sources:
+            fallback_source = self._find_fallback_primary_source(pruned, drop_sources)
             if fallback_source is None:
                 raise ValueError(
-                    f"Cannot drop primary modality '{drop_source}' because no fallback "
+                    "Cannot drop the requested modalities because no fallback "
                     "goal-conditioned modality is available."
                 )
 
-            fallback_goal_key = "goal" if fallback_source == "pixels" else f"goal_{fallback_source}"
+            fallback_goal_key = (
+                "goal" if fallback_source == "pixels" else f"goal_{fallback_source}"
+            )
             encoder.primary_source = fallback_source
             pruned["goal"] = pruned[fallback_goal_key]
 
@@ -107,8 +151,8 @@ class ModalityDropoutWorldModelPolicy(swm.policy.WorldModelPolicy):
         assert "goal" in info_dict, "'goal' must be provided in info_dict"
 
         prepared_info = self._prepare_info(dict(info_dict))
-        prepared_info, encoder, original_primary_source = self._drop_selected_modality(
-            prepared_info
+        prepared_info, encoder, original_primary_source = (
+            self._drop_selected_modalities(prepared_info)
         )
 
         try:
@@ -137,6 +181,7 @@ class ModalityDropoutWorldModelPolicy(swm.policy.WorldModelPolicy):
             action = self.process["action"].inverse_transform(action)
 
         return action
+
 
 def img_transform(cfg):
     transform = transforms.Compose(
@@ -238,7 +283,7 @@ def run(cfg: DictConfig):
 
     # -- run evaluation
     policy = cfg.get("policy", "random")
-    drop_modality = cfg.eval.get("drop_modality", None)
+    drop_modalities = get_drop_modalities(cfg.eval)
 
     if policy != "random":
         model = swm.policy.AutoCostModel(cfg.policy)
@@ -246,10 +291,10 @@ def run(cfg: DictConfig):
         model = model.eval()
         model.requires_grad_(False)
         model.interpolate_pos_encoding = True
-        if drop_modality is not None and not model_supports_missing_modalities(model):
+        if drop_modalities and not model_supports_missing_modalities(model):
             raise ValueError(
-                "eval.drop_modality requires a model whose fusion supports missing "
-                "modalities. This checkpoint does not."
+                "eval.drop_modality / eval.drop_modalities requires a model whose "
+                "fusion supports missing modalities. This checkpoint does not."
             )
         config = swm.PlanConfig(**cfg.plan_config)
         solver = hydra.utils.instantiate(cfg.solver, model=model)
@@ -258,15 +303,18 @@ def run(cfg: DictConfig):
             config=config,
             process=process,
             transform=transform,
-            drop_modality=drop_modality,
+            drop_modalities=drop_modalities,
         )
-        if drop_modality is not None:
-            print(f"Dropping modality '{drop_modality}' during evaluation.")
+        if drop_modalities:
+            print(f"Dropping modalities {drop_modalities} during evaluation.")
 
     else:
         policy = swm.policy.RandomPolicy()
-        if drop_modality is not None:
-            print("Ignoring eval.drop_modality because the selected policy is random.")
+        if drop_modalities:
+            print(
+                "Ignoring eval.drop_modality / eval.drop_modalities because the "
+                "selected policy is random."
+            )
 
     results_path = (
         Path(swm.data.utils.get_cache_dir(), cfg.policy).parent
@@ -329,7 +377,7 @@ def run(cfg: DictConfig):
         video_path=results_path,
     )
     end_time = time.time()
-    
+
     print(metrics)
 
     results_path = results_path / cfg.output.filename

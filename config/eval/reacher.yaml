@@ -31,6 +31,7 @@ eval:
   eval_budget: 50
   img_size: 224
   drop_modality: null
+  drop_modalities: []
   dataset_name: dmc/reacher_random
   callables:
     # -- set state

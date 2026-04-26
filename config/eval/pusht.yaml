@@ -32,6 +32,7 @@ eval:
   eval_budget: 50
   img_size: 224
   drop_modality: null
+  drop_modalities: []
   dataset_name: pusht_expert_train
   callables:
     # -- set state
