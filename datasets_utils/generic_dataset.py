@@ -57,53 +57,19 @@ class GenericDatasetAdapter(DatasetInterface):
         import stable_pretraining as spt
 
         from multimodal import get_image_modality_configs, get_vector_modality_configs
-        from utils import (
-            get_image_like_preprocessor,
-            get_img_preprocessor,
-        )
 
         transforms = []
-        image_sources = set()
+        image_sources = {
+            mod_cfg.get("source", name)
+            for name, mod_cfg in get_image_modality_configs(cfg.obs_encoder).items()
+        }
         passthrough_keys = set(passthrough_keys or [])
         vector_cfgs = {
             mod_cfg.get("source", name): mod_cfg
             for name, mod_cfg in get_vector_modality_configs(cfg.obs_encoder).items()
         }
 
-        for _, mod_cfg in get_image_modality_configs(cfg.obs_encoder).items():
-            source = mod_cfg.get("source")
-            if source in image_sources:
-                continue
-
-            preprocess = mod_cfg.get(
-                "preprocess",
-                "imagenet" if source == "pixels" else "generic",
-            )
-            img_size = mod_cfg.get("img_size", cfg.img_size)
-            if preprocess == "imagenet":
-                transforms.append(
-                    get_img_preprocessor(
-                        source=source,
-                        target=source,
-                        img_size=img_size,
-                    )
-                )
-            elif preprocess == "generic":
-                transforms.append(
-                    get_image_like_preprocessor(
-                        source=source,
-                        target=source,
-                        img_size=img_size,
-                        mean=mod_cfg.get("mean"),
-                        std=mod_cfg.get("std"),
-                    )
-                )
-            else:
-                raise ValueError(
-                    f"Unsupported preprocess type '{preprocess}' for source '{source}'."
-                )
-
-            image_sources.add(source)
+        # Image modalities stay raw in the dataset so preprocessing can run on the model device.
 
         for col in keys_to_load:
             if col in image_sources or col in passthrough_keys:

@@ -2,6 +2,7 @@ from collections import OrderedDict
 
 import stable_pretraining as spt
 import torch
+import torch.nn.functional as F
 from einops import rearrange
 from torch import nn
 
@@ -68,6 +69,60 @@ def _flatten_image_sequence(x: torch.Tensor):
     return flat, b, t
 
 
+class GPUImagePreprocessor(nn.Module):
+    """Move image scaling, resizing, and normalization onto the model device."""
+
+    def __init__(self, *, img_size=None, mean=None, std=None):
+        super().__init__()
+        self.img_size = img_size
+
+        if mean is not None and std is not None:
+            self.register_buffer(
+                "mean",
+                torch.tensor(mean, dtype=torch.float32).view(1, -1, 1, 1),
+                persistent=False,
+            )
+            self.register_buffer(
+                "std",
+                torch.tensor(std, dtype=torch.float32).view(1, -1, 1, 1),
+                persistent=False,
+            )
+        else:
+            self.register_buffer("mean", None, persistent=False)
+            self.register_buffer("std", None, persistent=False)
+
+    def forward(self, x: torch.Tensor):
+        x, b, t = _flatten_image_sequence(x)
+
+        if x.numel() and x.amax() > 1:
+            x = x / 255.0
+
+        if self.img_size is not None and x.shape[-2:] != (self.img_size, self.img_size):
+            x = F.interpolate(
+                x,
+                size=(self.img_size, self.img_size),
+                mode="bilinear",
+                align_corners=False,
+                antialias=True,
+            )
+
+        if self.mean is not None and self.std is not None:
+            mean = self.mean
+            std = self.std.clamp_min(1e-6)
+
+            if mean.size(1) == 1 and x.size(1) != 1:
+                mean = mean.expand(1, x.size(1), 1, 1)
+                std = std.expand(1, x.size(1), 1, 1)
+            elif mean.size(1) != x.size(1):
+                raise ValueError(
+                    f"Normalization stats expect {mean.size(1)} channels, got {x.size(1)}."
+                )
+
+            x = (x - mean) / std
+
+        return x, b, t
+
+
 class BaseModalityEncoder(nn.Module):
     def __init__(self, source, output_dim):
         super().__init__()
@@ -91,8 +146,15 @@ class ViTImageEncoder(BaseModalityEncoder):
         image_size,
         pretrained=False,
         projector_hidden_dim=2048,
+        mean=None,
+        std=None,
     ):
         super().__init__(source=source, output_dim=output_dim)
+        self.preprocess = GPUImagePreprocessor(
+            img_size=image_size,
+            mean=mean,
+            std=std,
+        )
         self.backbone = spt.backbone.utils.vit_hf(
             encoder_scale,
             patch_size=patch_size,
@@ -110,7 +172,7 @@ class ViTImageEncoder(BaseModalityEncoder):
         )
 
     def forward(self, info):
-        x, b, t = _flatten_image_sequence(self.get_input(info))
+        x, b, t = self.preprocess(self.get_input(info))
         output = self.backbone(x, interpolate_pos_encoding=True)
         cls_token = output.last_hidden_state[:, 0]
         emb = self.projector(cls_token)
@@ -126,8 +188,16 @@ class CNNImageEncoder(BaseModalityEncoder):
         output_dim,
         hidden_dims=(32, 64, 128),
         head_hidden_dim=None,
+        img_size=None,
+        mean=None,
+        std=None,
     ):
         super().__init__(source=source, output_dim=output_dim)
+        self.preprocess = GPUImagePreprocessor(
+            img_size=img_size,
+            mean=mean,
+            std=std,
+        )
         hidden_dims = list(hidden_dims)
         if not hidden_dims:
             raise ValueError("CNNImageEncoder requires at least one hidden dimension.")
@@ -166,7 +236,7 @@ class CNNImageEncoder(BaseModalityEncoder):
         )
 
     def forward(self, info):
-        x, b, t = _flatten_image_sequence(self.get_input(info))
+        x, b, t = self.preprocess(self.get_input(info))
         x = self.conv(x)
         x = self.head(x)
         return rearrange(x, "(b t) d -> b t d", b=b, t=t)
@@ -258,14 +328,33 @@ def build_modality_encoder(cfg, name, mod_cfg):
     output_dim = mod_cfg.output_dim
 
     if encoder_type == "vit":
+        preprocess = mod_cfg.get(
+            "preprocess",
+            "imagenet" if source == "pixels" else "generic",
+        )
+        img_size = mod_cfg.get("img_size", cfg.img_size)
+        mean = mod_cfg.get("mean")
+        std = mod_cfg.get("std")
+
+        if preprocess == "imagenet":
+            imagenet_stats = spt.data.dataset_stats.ImageNet
+            mean = imagenet_stats["mean"]
+            std = imagenet_stats["std"]
+        elif preprocess != "generic":
+            raise ValueError(
+                f"Unsupported preprocess type '{preprocess}' for source '{source}'."
+            )
+
         return ViTImageEncoder(
             source=source,
             output_dim=output_dim,
             encoder_scale=mod_cfg.get("encoder_scale", cfg.encoder_scale),
             patch_size=mod_cfg.get("patch_size", cfg.patch_size),
-            image_size=mod_cfg.get("img_size", cfg.img_size),
+            image_size=img_size,
             pretrained=mod_cfg.get("pretrained", False),
             projector_hidden_dim=mod_cfg.get("projector_hidden_dim", 2048),
+            mean=mean,
+            std=std,
         )
 
     if encoder_type == "cnn":
@@ -273,12 +362,32 @@ def build_modality_encoder(cfg, name, mod_cfg):
         if in_channels is None:
             in_channels = DEFAULT_MODALITY_CHANNELS.get(source)
 
+        preprocess = mod_cfg.get(
+            "preprocess",
+            "imagenet" if source == "pixels" else "generic",
+        )
+        img_size = mod_cfg.get("img_size", cfg.img_size)
+        mean = mod_cfg.get("mean")
+        std = mod_cfg.get("std")
+
+        if preprocess == "imagenet":
+            imagenet_stats = spt.data.dataset_stats.ImageNet
+            mean = imagenet_stats["mean"]
+            std = imagenet_stats["std"]
+        elif preprocess != "generic":
+            raise ValueError(
+                f"Unsupported preprocess type '{preprocess}' for source '{source}'."
+            )
+
         return CNNImageEncoder(
             source=source,
             in_channels=in_channels,
             output_dim=output_dim,
             hidden_dims=mod_cfg.get("hidden_dims", (32, 64, 128)),
             head_hidden_dim=mod_cfg.get("head_hidden_dim"),
+            img_size=img_size,
+            mean=mean,
+            std=std,
         )
 
     if encoder_type == "mlp":
