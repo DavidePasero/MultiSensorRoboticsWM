@@ -159,6 +159,9 @@ def corrupt_tensor(x: torch.Tensor, corruption: str) -> torch.Tensor:
 
 def model_supports_missing_modalities(model) -> bool:
     encoder = getattr(model, "encoder", None)
+    imputer = getattr(encoder, "imputer", None) if encoder is not None else None
+    if imputer is not None:
+        return bool(getattr(imputer, "supports_missing_modalities", False))
     fusion = getattr(encoder, "fusion", None) if encoder is not None else None
     return bool(getattr(fusion, "supports_missing_modalities", False))
 

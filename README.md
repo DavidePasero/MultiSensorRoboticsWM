@@ -86,13 +86,27 @@ python train.py data=pusht obs_encoder=pixels
 ```
 
 The current multimodal baseline is configured in `config/train/obs_encoder/multimodal.yaml` and includes:
-- `pixels`: ViT encoder with ImageNet preprocessing
-- `depth`: lightweight CNN encoder with generic image preprocessing
-- `tactile`: lightweight CNN encoder with generic image preprocessing
+- `pixels`: ViT encoder over already-preprocessed image tensors
+- `depth`: lightweight CNN encoder over already-preprocessed depth tensors
+- `tactile`: lightweight CNN encoder over already-preprocessed tactile tensors
 - `proprio`: MLP encoder with per-dimension normalization
 - `force_torque`: MLP encoder with dataset-wide normalization loaded from saved HDF5 stats
 
-The modality embeddings are concatenated and projected back to `wm.embed_dim` before being passed to the unchanged JEPA predictor. The fusion abstraction is intentionally separate so additional implementations such as cross-attention or MoE can be added later without changing `train.py` or `jepa.py`.
+Image preprocessing is now expected to happen offline during dataset conversion. The runtime code only handles tensor layout and encoding.
+
+The modality embeddings are first passed through an **imputer** stage that owns the shared token projection and missing-modality handling. The resulting completed modality tokens are then passed to the selected fusion module before the unchanged JEPA predictor.
+
+Imputer selection happens through:
+
+```yaml
+obs_encoder:
+  imputer:
+    type: ...
+```
+
+currently with:
+- `missing_token`: one learned missing token per modality in the shared token space
+- `selfmask`: a two-layer transformer imputer with random whole-modality masking, feature-dimension masking on kept modalities, and an EMA target projection for masked-token reconstruction
 
 Fusion selection now happens directly through the obs-encoder config. The field:
 
@@ -103,32 +117,28 @@ obs_encoder:
 ```
 
 currently supports:
-- `concatproject`: project each modality to a shared token dimension, concatenate the projected modality vectors in a fixed order, and project the result to `wm.embed_dim`
-- `selfattention`: project each modality to a shared token dimension, add learned modality embeddings, prepend a learned state token, run self-attention, and project the state token to `wm.embed_dim`
-- `gated`: project each modality to a shared token dimension, compute feature-wise modality gates from per-modality MLPs and a mean-pooled context token, and fuse with a weighted sum before projecting to `wm.embed_dim`
+- `concatproject`: concatenate the completed modality tokens in a fixed order and project them to `wm.embed_dim`
+- `selfattention`: add learned modality embeddings, prepend a learned state token, run self-attention, and project the state token to `wm.embed_dim`
+- `gated`: compute feature-wise modality gates from per-modality MLPs and a mean-pooled context token, and fuse with a weighted sum before projecting to `wm.embed_dim`
 
-The shared-space fusion configs support training-time random modality masking through:
+Training-time random full-modality masking now lives in the imputer config:
 
 ```yaml
 obs_encoder:
-  fusion:
-    concatproject:
-      random_mask_prob: 0.0
-    gated:
-      random_mask_prob: 0.0
-    selfattention:
-      random_mask_prob: 0.0
+  imputer:
+    random_mask_prob: 0.0
 ```
 
 Here, `random_mask_prob` is the probability of randomly masking each available
 modality during training. Setting it to `0.0` disables random modality masking.
-Regardless of that value, these fusion modules can still handle truly missing
-modalities at evaluation time by replacing them with a learned mask token.
+For the `selfmask` imputer, you can additionally control partial feature masking
+through `obs_encoder.imputer.feature_mask_ratio`.
 
-The default multimodal config includes both sets of hyperparameters under:
-- `obs_encoder.fusion.concatproject.*`
-- `obs_encoder.fusion.gated.*`
-- `obs_encoder.fusion.selfattention.*`
+The default multimodal config includes:
+- imputer hyperparameters under `obs_encoder.imputer.*`
+- fusion hyperparameters under `obs_encoder.fusion.concatproject.*`
+- fusion hyperparameters under `obs_encoder.fusion.gated.*`
+- fusion hyperparameters under `obs_encoder.fusion.selfattention.*`
 
 This makes it easy to compare the two fusion strategies without changing code. For example:
 
@@ -143,7 +153,15 @@ python train.py data=metaworld obs_encoder=multimodal obs_encoder.fusion.type=se
 ```bash
 python train.py data=metaworld obs_encoder=multimodal \
   obs_encoder.fusion.type=selfattention \
-  obs_encoder.fusion.selfattention.random_mask_prob=0.3
+  obs_encoder.imputer.random_mask_prob=0.3
+```
+
+To enable the SelfMASK-style imputer:
+
+```bash
+python train.py data=metaworld obs_encoder=multimodal \
+  obs_encoder.imputer.type=selfmask \
+  obs_encoder.fusion.type=selfattention
 ```
 
 If you want to keep runs separate for a fair comparison, give each one its own output directory:

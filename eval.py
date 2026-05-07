@@ -20,6 +20,9 @@ import stable_worldmodel as swm
 
 def model_supports_missing_modalities(model):
     encoder = getattr(model, "encoder", None)
+    imputer = getattr(encoder, "imputer", None) if encoder is not None else None
+    if imputer is not None:
+        return bool(getattr(imputer, "supports_missing_modalities", False))
     fusion = getattr(encoder, "fusion", None) if encoder is not None else None
     return bool(getattr(fusion, "supports_missing_modalities", False))
 
@@ -195,6 +198,18 @@ def img_transform(cfg):
     return transform
 
 
+def dataset_images_preprocessed(dataset) -> bool:
+    h5_path = getattr(dataset, "h5_path", None)
+    if h5_path is None:
+        return False
+
+    with h5py.File(h5_path, "r") as f:
+        return bool(
+            f.attrs.get("images_preprocessed", False)
+            or f.attrs.get("preprocessed", False)
+        )
+
+
 def resolve_dataset_env_idx(dataset, cfg):
     """Return the dataset env_idx matching cfg.world.metaworld_env_name, if possible."""
     explicit = cfg.eval.get("env_idx", None)
@@ -257,13 +272,14 @@ def run(cfg: DictConfig):
     render_size = cfg.eval.get("render_size", cfg.eval.img_size)
     world = swm.World(**cfg.world, image_shape=(render_size, render_size))
 
-    # create the transform
-    transform = {
-        "pixels": img_transform(cfg),
-        "goal": img_transform(cfg),
-    }
-
     dataset = get_dataset(cfg, cfg.eval.dataset_name)
+    if dataset_images_preprocessed(dataset):
+        transform = {}
+    else:
+        transform = {
+            "pixels": img_transform(cfg),
+            "goal": img_transform(cfg),
+        }
     stats_dataset = dataset  # get_dataset(cfg, cfg.dataset.stats)
     col_name = "episode_idx" if "episode_idx" in dataset.column_names else "ep_idx"
     ep_indices, _ = np.unique(stats_dataset.get_col_data(col_name), return_index=True)

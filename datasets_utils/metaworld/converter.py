@@ -6,6 +6,8 @@ from pathlib import Path
 
 import h5py
 import numpy as np
+import torch
+import torch.nn.functional as F
 
 from datasets_utils.metaworld.preprocessor import (
     finalize_running_vector_stats,
@@ -16,6 +18,12 @@ from datasets_utils.metaworld.preprocessor import (
 
 
 EE_POSITION_SOURCE_KEYS = ("ee_position", "ee_xyz")
+IMAGE_CHANNEL_COUNTS = (1, 2, 3, 4)
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
+DEFAULT_PIXELS_SIZE = 224
+DEFAULT_DEPTH_SIZE = 224
+DEFAULT_TACTILE_SIZE = 64
 
 
 def iter_episodes(src_file):
@@ -45,26 +53,94 @@ def find_first_present_key(episode_group, candidates: tuple[str, ...]) -> str | 
     return None
 
 
+def _prepare_image_sequence(values):
+    values = torch.as_tensor(values)
+    if values.ndim == 3:
+        values = values.unsqueeze(1)
+    elif values.ndim == 4:
+        if values.shape[1] in IMAGE_CHANNEL_COUNTS:
+            pass
+        elif values.shape[-1] in IMAGE_CHANNEL_COUNTS:
+            values = values.permute(0, 3, 1, 2)
+        else:
+            raise ValueError(
+                "Unable to infer channels for image sequence with shape "
+                f"{tuple(values.shape)}."
+            )
+    else:
+        raise ValueError(
+            f"Expected image sequence tensor with 3 or 4 dims, got {tuple(values.shape)}."
+        )
+    return values.float()
+
+
+def preprocess_image_sequence(values, img_size, mean=None, std=None):
+    values = _prepare_image_sequence(values)
+
+    if values.numel() and values.amax() > 1:
+        values = values / 255.0
+
+    if img_size is not None and values.shape[-2:] != (img_size, img_size):
+        values = F.interpolate(
+            values,
+            size=(img_size, img_size),
+            mode="bilinear",
+            align_corners=False,
+            antialias=True,
+        )
+
+    if mean is not None and std is not None:
+        mean_t = torch.tensor(mean, dtype=values.dtype).view(1, -1, 1, 1)
+        std_t = torch.tensor(std, dtype=values.dtype).view(1, -1, 1, 1).clamp_min(1e-6)
+        values = (values - mean_t) / std_t
+
+    return values.cpu().numpy().astype(np.float16, copy=False)
+
+
+def _merge_proprio_and_gripper(episode_group, merge_gripper):
+    proprio = require_episode_key(episode_group, "proprio")[()].astype(np.float32)
+    gripper = None
+    if "gripper" in episode_group:
+        gripper = require_episode_key(episode_group, "gripper")[()].astype(np.float32)
+        if gripper.ndim == 1:
+            gripper = gripper[:, None]
+
+    if merge_gripper and gripper is not None:
+        proprio = np.concatenate([proprio, gripper], axis=-1)
+
+    return proprio, gripper
+
+
 def infer_shapes(src_file, merge_gripper):
     for _env_name, _episode_name, episode_group in iter_episodes(src_file):
+        pixels = preprocess_image_sequence(
+            require_episode_key(episode_group, "pixels")[()],
+            img_size=DEFAULT_PIXELS_SIZE,
+            mean=IMAGENET_MEAN,
+            std=IMAGENET_STD,
+        )
+        depth = preprocess_image_sequence(
+            require_episode_key(episode_group, "depth")[()],
+            img_size=DEFAULT_DEPTH_SIZE,
+        )
+        tactile = preprocess_image_sequence(
+            require_episode_key(episode_group, "tactile")[()],
+            img_size=DEFAULT_TACTILE_SIZE,
+        )
+        proprio, gripper = _merge_proprio_and_gripper(episode_group, merge_gripper)
         shapes = {
-            "pixels": require_episode_key(episode_group, "pixels").shape[1:],
-            "depth": require_episode_key(episode_group, "depth").shape[1:],
-            "tactile": require_episode_key(episode_group, "tactile").shape[1:],
+            "pixels": pixels.shape[1:],
+            "depth": depth.shape[1:],
+            "tactile": tactile.shape[1:],
+            "proprio": proprio.shape[1:],
             "action": require_episode_key(episode_group, "action").shape[1:],
             "force_torque": require_episode_key(
                 episode_group, "force_torque"
             ).shape[1:],
         }
 
-        proprio = require_episode_key(episode_group, "proprio")[()]
-        if "gripper" in episode_group:
-            gripper = episode_group["gripper"][()]
-            shapes["gripper"] = gripper.shape[1:] if gripper.ndim > 1 else ()
-        if merge_gripper and "gripper" in episode_group:
-            shapes["proprio"] = (proprio.shape[-1] + 1,)
-        else:
-            shapes["proprio"] = proprio.shape[1:]
+        if gripper is not None:
+            shapes["gripper"] = gripper.shape[1:]
 
         ee_position_source = find_first_present_key(
             episode_group, EE_POSITION_SOURCE_KEYS
@@ -116,18 +192,17 @@ def convert_dataset(src_path, dst_path, merge_gripper=True):
         ee_position_source = find_first_present_key(
             first_episode_group, EE_POSITION_SOURCE_KEYS
         )
-
         force_torque_stats = init_running_vector_stats(shapes["force_torque"][0])
 
         with h5py.File(dst_path, "w") as dst_file:
             pixels_ds = create_dataset(
-                dst_file, "pixels", total_steps, shapes["pixels"], np.uint8
+                dst_file, "pixels", total_steps, shapes["pixels"], np.float16
             )
             depth_ds = create_dataset(
-                dst_file, "depth", total_steps, shapes["depth"], np.float32
+                dst_file, "depth", total_steps, shapes["depth"], np.float16
             )
             tactile_ds = create_dataset(
-                dst_file, "tactile", total_steps, shapes["tactile"], np.float32
+                dst_file, "tactile", total_steps, shapes["tactile"], np.float16
             )
             proprio_ds = create_dataset(
                 dst_file, "proprio", total_steps, shapes["proprio"], np.float32
@@ -214,10 +289,24 @@ def convert_dataset(src_path, dst_path, merge_gripper=True):
                 num_steps = episode_length(episode_group)
                 sl = slice(offset, offset + num_steps)
 
-                pixels_ds[sl] = require_episode_key(episode_group, "pixels")[()]
-                depth_ds[sl] = require_episode_key(episode_group, "depth")[()]
-                tactile_ds[sl] = require_episode_key(episode_group, "tactile")[()]
-                action_ds[sl] = require_episode_key(episode_group, "action")[()]
+                pixels_ds[sl] = preprocess_image_sequence(
+                    require_episode_key(episode_group, "pixels")[()],
+                    img_size=DEFAULT_PIXELS_SIZE,
+                    mean=IMAGENET_MEAN,
+                    std=IMAGENET_STD,
+                )
+                depth_ds[sl] = preprocess_image_sequence(
+                    require_episode_key(episode_group, "depth")[()],
+                    img_size=DEFAULT_DEPTH_SIZE,
+                )
+                tactile_ds[sl] = preprocess_image_sequence(
+                    require_episode_key(episode_group, "tactile")[()],
+                    img_size=DEFAULT_TACTILE_SIZE,
+                )
+
+                action_ds[sl] = require_episode_key(episode_group, "action")[()].astype(
+                    np.float32
+                )
 
                 force_torque = require_episode_key(
                     episode_group, "force_torque"
@@ -225,23 +314,10 @@ def convert_dataset(src_path, dst_path, merge_gripper=True):
                 force_torque_ds[sl] = force_torque
                 update_running_vector_stats(force_torque_stats, force_torque)
 
-                proprio = require_episode_key(
-                    episode_group, "proprio"
-                )[()].astype(np.float32)
-                if "gripper" in shapes:
-                    gripper = require_episode_key(
-                        episode_group, "gripper"
-                    )[()].astype(np.float32)
-                    if gripper_ds is not None:
-                        gripper_ds[sl] = gripper
-                else:
-                    gripper = None
-
-                if merge_gripper and gripper is not None:
-                    if gripper.ndim == 1:
-                        gripper = gripper[:, None]
-                    proprio = np.concatenate([proprio, gripper], axis=-1)
+                proprio, gripper = _merge_proprio_and_gripper(episode_group, merge_gripper)
                 proprio_ds[sl] = proprio
+                if gripper_ds is not None and gripper is not None:
+                    gripper_ds[sl] = gripper
 
                 if ee_position_ds is not None:
                     source_key = find_first_present_key(
@@ -291,6 +367,11 @@ def convert_dataset(src_path, dst_path, merge_gripper=True):
             dst_file.attrs["source_dataset"] = str(src_path)
             dst_file.attrs["env_names_json"] = json.dumps(env_names)
             dst_file.attrs["merge_gripper_into_proprio"] = bool(merge_gripper)
+            dst_file.attrs["preprocessed"] = True
+            dst_file.attrs["images_preprocessed"] = True
+            dst_file.attrs["pixels_size"] = DEFAULT_PIXELS_SIZE
+            dst_file.attrs["depth_size"] = DEFAULT_DEPTH_SIZE
+            dst_file.attrs["tactile_size"] = DEFAULT_TACTILE_SIZE
             if ee_position_source is not None:
                 dst_file.attrs["ee_position_source_key"] = ee_position_source
 

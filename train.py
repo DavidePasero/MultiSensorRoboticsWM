@@ -27,6 +27,7 @@ def lejepa_forward(self, batch, stage, cfg):
     ctx_len = cfg.wm.history_size
     n_preds = cfg.wm.num_preds
     lambd = cfg.loss.sigreg.weight
+    imputer_weight = cfg.loss.get("imputer", {}).get("weight", 0.0)
 
     # Replace NaN values with 0 (occurs at sequence boundaries)
     batch["action"] = torch.nan_to_num(batch["action"], 0.0)
@@ -44,8 +45,14 @@ def lejepa_forward(self, batch, stage, cfg):
 
     # LeWM loss
     output["pred_loss"] = (pred_emb - tgt_emb).pow(2).mean()
-    output["sigreg_loss"]= self.sigreg(emb.transpose(0, 1))
-    output["loss"] = output["pred_loss"] + lambd * output["sigreg_loss"]  
+    output["sigreg_loss"] = self.sigreg(emb.transpose(0, 1))
+    if "imputer_recon_loss" not in output:
+        output["imputer_recon_loss"] = output["pred_loss"].new_zeros(())
+    output["loss"] = (
+        output["pred_loss"]
+        + lambd * output["sigreg_loss"]
+        + imputer_weight * output["imputer_recon_loss"]
+    )
 
     losses_dict = {f"{stage}/{k}": v.detach() for k, v in output.items() if "loss" in k}
     self.log_dict(losses_dict, on_step=True, sync_dist=True)

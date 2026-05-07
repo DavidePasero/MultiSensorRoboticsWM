@@ -6,7 +6,6 @@ modalities:
     enabled: True
     source: pixels
     encoder_type: vit
-    preprocess: imagenet
     encoder_scale: ${encoder_scale}
     patch_size: ${patch_size}
     img_size: ${img_size}
@@ -19,20 +18,16 @@ modalities:
     source: depth
     encoder_type: cnn
     in_channels: 1
-    img_size: ${img_size}
     output_dim: 64
     hidden_dims: [32, 64, 128]
-    preprocess: generic
 
   tactile:
     enabled: True
     source: tactile
     encoder_type: cnn
     in_channels: 2
-    img_size: 64
     output_dim: 64
     hidden_dims: [32, 64, 128]
-    preprocess: generic
 
   proprio:
     enabled: True
@@ -49,23 +44,29 @@ modalities:
     output_dim: 32
     hidden_dims: [128, 128]
 
-fusion:
-  type: concatproject
-  output_dim: ${wm.embed_dim}
-  concatproject:
-    model_dim: 128
-    hidden_dim: 512
-    dropout: 0.0
-    random_mask_prob: 0.0
-  gated:
-    model_dim: 128
-    gate_hidden_dim: 256
-    dropout: 0.0
-    random_mask_prob: 0.0
-  selfattention:
-    model_dim: 128
+imputer:
+  type: missing_token
+  model_dim: 128
+  random_mask_prob: 0.0
+  feature_mask_ratio: 0.25
+  ema_decay: 0.996
+  selfmask:
     num_heads: 4
     num_layers: 2
     mlp_ratio: 4.0
     dropout: 0.0
-    random_mask_prob: 0.0
+
+fusion:
+  type: concatproject
+  output_dim: ${wm.embed_dim}
+  concatproject:
+    hidden_dim: 512
+    dropout: 0.0
+  gated:
+    gate_hidden_dim: 256
+    dropout: 0.0
+  selfattention:
+    num_heads: 4
+    num_layers: 2
+    mlp_ratio: 4.0
+    dropout: 0.0
