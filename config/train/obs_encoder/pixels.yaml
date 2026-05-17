@@ -6,6 +6,7 @@ modalities:
     enabled: True
     source: pixels
     encoder_type: vit
+    preprocess: imagenet
     encoder_scale: ${encoder_scale}
     patch_size: ${patch_size}
     img_size: ${img_size}

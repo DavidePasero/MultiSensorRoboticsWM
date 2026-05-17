@@ -86,13 +86,11 @@ python train.py data=pusht obs_encoder=pixels
 ```
 
 The current multimodal baseline is configured in `config/train/obs_encoder/multimodal.yaml` and includes:
-- `pixels`: ViT encoder over already-preprocessed image tensors
-- `depth`: lightweight CNN encoder over already-preprocessed depth tensors
-- `tactile`: lightweight CNN encoder over already-preprocessed tactile tensors
+- `pixels`: ViT encoder with ImageNet preprocessing
+- `depth`: lightweight CNN encoder with generic image preprocessing
+- `tactile`: lightweight CNN encoder with generic image preprocessing
 - `proprio`: MLP encoder with per-dimension normalization
 - `force_torque`: MLP encoder with dataset-wide normalization loaded from saved HDF5 stats
-
-Image preprocessing is now expected to happen offline during dataset conversion. The runtime code only handles tensor layout and encoding.
 
 The modality embeddings are first passed through an **imputer** stage that owns the shared token projection and missing-modality handling. The resulting completed modality tokens are then passed to the selected fusion module before the unchanged JEPA predictor.
 

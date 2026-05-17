@@ -6,6 +6,7 @@ modalities:
     enabled: True
     source: pixels
     encoder_type: vit
+    preprocess: imagenet
     encoder_scale: ${encoder_scale}
     patch_size: ${patch_size}
     img_size: ${img_size}
@@ -18,16 +19,20 @@ modalities:
     source: depth
     encoder_type: cnn
     in_channels: 1
+    img_size: ${img_size}
     output_dim: 64
     hidden_dims: [32, 64, 128]
+    preprocess: generic
 
   tactile:
     enabled: True
     source: tactile
     encoder_type: cnn
     in_channels: 2
+    img_size: 64
     output_dim: 64
     hidden_dims: [32, 64, 128]
+    preprocess: generic
 
   proprio:
     enabled: True

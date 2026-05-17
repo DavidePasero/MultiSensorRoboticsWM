@@ -12,6 +12,7 @@ import hydra
 import numpy as np
 import stable_pretraining as spt
 import torch
+import torch.nn.functional as F
 from omegaconf import DictConfig, OmegaConf
 from sklearn import preprocessing
 from torchvision.transforms import v2 as transforms
@@ -70,6 +71,20 @@ def get_drop_modalities(eval_cfg):
         if modality not in drop_modalities:
             drop_modalities.append(modality)
     return drop_modalities
+
+
+def _make_json_safe(value):
+    if isinstance(value, dict):
+        return {k: _make_json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_make_json_safe(v) for v in value]
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if torch.is_tensor(value):
+        return value.detach().cpu().tolist()
+    return value
 
 
 class ModalityDropoutWorldModelPolicy(swm.policy.WorldModelPolicy):
@@ -185,6 +200,13 @@ class ModalityDropoutWorldModelPolicy(swm.policy.WorldModelPolicy):
 
         return action
 
+    def prepare_eval_info(self, info_dict: dict):
+        prepared_info = self._prepare_info(dict(info_dict))
+        prepared_info, encoder, original_primary_source = (
+            self._drop_selected_modalities(prepared_info)
+        )
+        return prepared_info, encoder, original_primary_source
+
 
 def img_transform(cfg):
     transform = transforms.Compose(
@@ -196,18 +218,6 @@ def img_transform(cfg):
         ]
     )
     return transform
-
-
-def dataset_images_preprocessed(dataset) -> bool:
-    h5_path = getattr(dataset, "h5_path", None)
-    if h5_path is None:
-        return False
-
-    with h5py.File(h5_path, "r") as f:
-        return bool(
-            f.attrs.get("images_preprocessed", False)
-            or f.attrs.get("preprocessed", False)
-        )
 
 
 def resolve_dataset_env_idx(dataset, cfg):
@@ -260,6 +270,52 @@ def get_dataset(cfg, dataset_name):
     return dataset
 
 
+@torch.no_grad()
+def compute_final_latent_distance_metrics(policy, world):
+    model = getattr(getattr(policy, "solver", None), "model", None)
+    if model is None:
+        return {}
+
+    prepared_info, encoder, original_primary_source = policy.prepare_eval_info(world.infos)
+    try:
+        device = next(model.parameters()).device
+        for key, value in list(prepared_info.items()):
+            if torch.is_tensor(value):
+                prepared_info[key] = value.to(device)
+
+        current = {}
+        for key, value in prepared_info.items():
+            if not torch.is_tensor(value):
+                continue
+            if key == "goal" or key.startswith("goal_") or key == "action":
+                continue
+            current[key] = value[:, 0]
+
+        goal = {key: value[:, 0] for key, value in prepared_info.items() if torch.is_tensor(value)}
+        goal_source = getattr(model.encoder, "primary_source", "pixels")
+        goal[goal_source] = goal["goal"]
+        for key in list(goal.keys()):
+            if key.startswith("goal_"):
+                goal[key[len("goal_"):]] = goal.pop(key)
+        goal.pop("action", None)
+
+        current = model.encode(current)
+        goal = model.encode(goal)
+
+        current_emb = current["emb"][:, -1]
+        goal_emb = goal["emb"][:, -1]
+        distances = F.mse_loss(current_emb, goal_emb.detach(), reduction="none").sum(dim=-1)
+        distances_np = distances.detach().cpu().numpy()
+        return {
+            "final_latent_goal_distances": distances_np,
+            "final_latent_goal_distance_mean": float(distances_np.mean()),
+            "final_latent_goal_distance_variance": float(distances_np.var()),
+        }
+    finally:
+        if encoder is not None and original_primary_source is not None:
+            encoder.primary_source = original_primary_source
+
+
 @hydra.main(version_base=None, config_path="./config/eval", config_name="pusht")
 def run(cfg: DictConfig):
     """Run evaluation of dinowm vs random policy."""
@@ -272,14 +328,12 @@ def run(cfg: DictConfig):
     render_size = cfg.eval.get("render_size", cfg.eval.img_size)
     world = swm.World(**cfg.world, image_shape=(render_size, render_size))
 
+    transform = {
+        "pixels": img_transform(cfg),
+        "goal": img_transform(cfg),
+    }
+
     dataset = get_dataset(cfg, cfg.eval.dataset_name)
-    if dataset_images_preprocessed(dataset):
-        transform = {}
-    else:
-        transform = {
-            "pixels": img_transform(cfg),
-            "goal": img_transform(cfg),
-        }
     stats_dataset = dataset  # get_dataset(cfg, cfg.dataset.stats)
     col_name = "episode_idx" if "episode_idx" in dataset.column_names else "ep_idx"
     ep_indices, _ = np.unique(stats_dataset.get_col_data(col_name), return_index=True)
@@ -303,7 +357,8 @@ def run(cfg: DictConfig):
 
     if policy != "random":
         model = swm.policy.AutoCostModel(cfg.policy)
-        model = model.to("cuda")
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model = model.to(device)
         model = model.eval()
         model.requires_grad_(False)
         model.interpolate_pos_encoding = True
@@ -313,6 +368,7 @@ def run(cfg: DictConfig):
                 "fusion supports missing modalities. This checkpoint does not."
             )
         config = swm.PlanConfig(**cfg.plan_config)
+        cfg.solver.device = device
         solver = hydra.utils.instantiate(cfg.solver, model=model)
         policy = ModalityDropoutWorldModelPolicy(
             solver=solver,
@@ -392,9 +448,12 @@ def run(cfg: DictConfig):
         callables=OmegaConf.to_container(cfg.eval.get("callables"), resolve=True),
         video_path=results_path,
     )
+    if cfg.get("policy", "random") != "random":
+        metrics.update(compute_final_latent_distance_metrics(policy, world))
     end_time = time.time()
 
     print(metrics)
+    print("METRICS_JSON=" + json.dumps(_make_json_safe(metrics), sort_keys=True))
 
     results_path = results_path / cfg.output.filename
     results_path.parent.mkdir(parents=True, exist_ok=True)

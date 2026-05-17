@@ -2,6 +2,7 @@ from collections import OrderedDict
 
 import stable_pretraining as spt
 import torch
+import torch.nn.functional as F
 from einops import rearrange
 from torch import nn
 
@@ -69,6 +70,57 @@ def _flatten_image_sequence(x: torch.Tensor):
     return flat, b, t
 
 
+def _preprocess_image_sequence(x: torch.Tensor, *, img_size=None, mean=None, std=None):
+    x, b, t = _flatten_image_sequence(x)
+
+    if x.numel() and x.amax() > 1:
+        x = x / 255.0
+
+    if img_size is not None and x.shape[-2:] != (img_size, img_size):
+        x = F.interpolate(
+            x,
+            size=(img_size, img_size),
+            mode="bilinear",
+            align_corners=False,
+            antialias=True,
+        )
+
+    if mean is not None and std is not None:
+        mean = torch.tensor(mean, dtype=x.dtype, device=x.device).view(1, -1, 1, 1)
+        std = torch.tensor(std, dtype=x.dtype, device=x.device).view(1, -1, 1, 1)
+        std = std.clamp_min(1e-6)
+
+        if mean.size(1) == 1 and x.size(1) != 1:
+            mean = mean.expand(1, x.size(1), 1, 1)
+            std = std.expand(1, x.size(1), 1, 1)
+        elif mean.size(1) != x.size(1):
+            raise ValueError(
+                f"Normalization stats expect {mean.size(1)} channels, got {x.size(1)}."
+            )
+
+        x = (x - mean) / std
+
+    return x, b, t
+
+
+def _default_image_preprocess(source, *, img_size=None):
+    if img_size is None:
+        if source == "tactile":
+            img_size = 64
+        elif source in {"pixels", "depth"}:
+            img_size = 224
+
+    if source == "pixels":
+        imagenet_stats = spt.data.dataset_stats.ImageNet
+        mean = imagenet_stats["mean"]
+        std = imagenet_stats["std"]
+    else:
+        mean = None
+        std = None
+
+    return img_size, mean, std
+
+
 class BaseModalityEncoder(nn.Module):
     def __init__(self, source, output_dim):
         super().__init__()
@@ -111,7 +163,17 @@ class ViTImageEncoder(BaseModalityEncoder):
         )
 
     def forward(self, info):
-        x, b, t = _flatten_image_sequence(self.get_input(info))
+        image_size = getattr(self.backbone.config, "image_size", None)
+        image_size, mean, std = _default_image_preprocess(
+            self.source,
+            img_size=image_size,
+        )
+        x, b, t = _preprocess_image_sequence(
+            self.get_input(info),
+            img_size=image_size,
+            mean=mean,
+            std=std,
+        )
         output = self.backbone(x, interpolate_pos_encoding=True)
         cls_token = output.last_hidden_state[:, 0]
         emb = self.projector(cls_token)
@@ -167,7 +229,13 @@ class CNNImageEncoder(BaseModalityEncoder):
         )
 
     def forward(self, info):
-        x, b, t = _flatten_image_sequence(self.get_input(info))
+        img_size, mean, std = _default_image_preprocess(self.source)
+        x, b, t = _preprocess_image_sequence(
+            self.get_input(info),
+            img_size=img_size,
+            mean=mean,
+            std=std,
+        )
         x = self.conv(x)
         x = self.head(x)
         return rearrange(x, "(b t) d -> b t d", b=b, t=t)
@@ -227,6 +295,7 @@ class MultiModalObsEncoder(nn.Module):
     def forward(self, info):
         modality_embs = OrderedDict()
         missing = []
+        imputer = getattr(self, "imputer", None)
         for name, encoder in self.encoders.items():
             if encoder.source not in info:
                 missing.append(name)
@@ -242,15 +311,15 @@ class MultiModalObsEncoder(nn.Module):
 
         aux = {}
         fusion_inputs = modality_embs
-        if self.imputer is not None:
+        if imputer is not None:
             if missing and not getattr(
-                self.imputer, "supports_missing_modalities", False
+                imputer, "supports_missing_modalities", False
             ):
                 raise KeyError(
                     "Missing observation modalities for the selected imputer: "
                     f"{missing}."
                 )
-            aux = self.imputer(modality_embs)
+            aux = imputer(modality_embs)
             fusion_inputs = aux.pop("modality_tokens")
         elif missing and not getattr(self.fusion, "supports_missing_modalities", False):
             raise KeyError(
@@ -263,7 +332,7 @@ class MultiModalObsEncoder(nn.Module):
         output = {"emb": fused_emb}
         if self.keep_modality_embeddings:
             output["modality_embs"] = modality_embs
-            if self.imputer is not None:
+            if imputer is not None:
                 output["modality_tokens"] = fusion_inputs
         output.update(aux)
         output.update(fusion_aux)
@@ -276,7 +345,15 @@ def build_modality_encoder(cfg, name, mod_cfg):
     output_dim = mod_cfg.output_dim
 
     if encoder_type == "vit":
+        preprocess = mod_cfg.get(
+            "preprocess",
+            "imagenet" if source == "pixels" else "generic",
+        )
         img_size = mod_cfg.get("img_size", cfg.img_size)
+        if preprocess not in {"imagenet", "generic"}:
+            raise ValueError(
+                f"Unsupported preprocess type '{preprocess}' for source '{source}'."
+            )
 
         return ViTImageEncoder(
             source=source,
@@ -292,6 +369,15 @@ def build_modality_encoder(cfg, name, mod_cfg):
         in_channels = mod_cfg.get("in_channels")
         if in_channels is None:
             in_channels = DEFAULT_MODALITY_CHANNELS.get(source)
+
+        preprocess = mod_cfg.get(
+            "preprocess",
+            "imagenet" if source == "pixels" else "generic",
+        )
+        if preprocess not in {"imagenet", "generic"}:
+            raise ValueError(
+                f"Unsupported preprocess type '{preprocess}' for source '{source}'."
+            )
 
         return CNNImageEncoder(
             source=source,
