@@ -286,35 +286,39 @@ def compute_final_latent_distance_metrics(policy, world):
         model_encoder = getattr(model, "encoder", None)
         modality_encoders = getattr(model_encoder, "encoders", {})
         modality_sources = []
+        image_sources = set()
         for _, modality_encoder in modality_encoders.items():
             source = getattr(modality_encoder, "source", None)
             if source is not None and source not in modality_sources:
                 modality_sources.append(source)
+            if source in {"pixels", "depth", "tactile"}:
+                image_sources.add(source)
 
-        def _select_first_step(value):
-            if value.ndim >= 2:
-                return value[:, 0]
+        def _ensure_sequence_value(source, value):
+            if source in image_sources:
+                if value.ndim == 4:
+                    return value.unsqueeze(1)
+                return value
+            if value.ndim == 2:
+                return value.unsqueeze(1)
             return value
 
         current = {}
         for source in modality_sources:
             value = prepared_info.get(source)
             if torch.is_tensor(value):
-                current[source] = _select_first_step(value)
+                current[source] = _ensure_sequence_value(source, value)
 
-        goal = {
-            key: _select_first_step(value)
-            for key, value in prepared_info.items()
-            if torch.is_tensor(value)
-        }
         goal_source = getattr(model.encoder, "primary_source", "pixels")
-        goal[goal_source] = goal["goal"]
-        for key in list(goal.keys()):
-            if key.startswith("goal_"):
-                goal[key[len("goal_"):]] = goal.pop(key)
-        goal.pop("action", None)
-        goal.pop("goal", None)
-        goal = {key: value for key, value in goal.items() if key in modality_sources}
+        goal = {}
+        for source in modality_sources:
+            if source == goal_source:
+                key = "goal"
+            else:
+                key = f"goal_{source}"
+            value = prepared_info.get(key)
+            if torch.is_tensor(value):
+                goal[source] = _ensure_sequence_value(source, value)
 
         current = model.encode(current)
         goal = model.encode(goal)
