@@ -283,21 +283,38 @@ def compute_final_latent_distance_metrics(policy, world):
             if torch.is_tensor(value):
                 prepared_info[key] = value.to(device)
 
-        current = {}
-        for key, value in prepared_info.items():
-            if not torch.is_tensor(value):
-                continue
-            if key == "goal" or key.startswith("goal_") or key == "action":
-                continue
-            current[key] = value[:, 0]
+        model_encoder = getattr(model, "encoder", None)
+        modality_encoders = getattr(model_encoder, "encoders", {})
+        modality_sources = []
+        for _, modality_encoder in modality_encoders.items():
+            source = getattr(modality_encoder, "source", None)
+            if source is not None and source not in modality_sources:
+                modality_sources.append(source)
 
-        goal = {key: value[:, 0] for key, value in prepared_info.items() if torch.is_tensor(value)}
+        def _select_first_step(value):
+            if value.ndim >= 2:
+                return value[:, 0]
+            return value
+
+        current = {}
+        for source in modality_sources:
+            value = prepared_info.get(source)
+            if torch.is_tensor(value):
+                current[source] = _select_first_step(value)
+
+        goal = {
+            key: _select_first_step(value)
+            for key, value in prepared_info.items()
+            if torch.is_tensor(value)
+        }
         goal_source = getattr(model.encoder, "primary_source", "pixels")
         goal[goal_source] = goal["goal"]
         for key in list(goal.keys()):
             if key.startswith("goal_"):
                 goal[key[len("goal_"):]] = goal.pop(key)
         goal.pop("action", None)
+        goal.pop("goal", None)
+        goal = {key: value for key, value in goal.items() if key in modality_sources}
 
         current = model.encode(current)
         goal = model.encode(goal)
