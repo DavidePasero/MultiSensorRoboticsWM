@@ -1,12 +1,12 @@
 #!/bin/bash
 
-#SBATCH --partition=gpu_mig
+#SBATCH --partition=gpu_a100
 #SBATCH --gpus=1
-#SBATCH --job-name=TRAIN
+#SBATCH --job-name=PLANNING
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --time=5:00:00
-#SBATCH --output=out_job_dir/TRAIN_%A.out
+#SBATCH --output=out_job_dir/PLANNING_%A.out
 
 set -euo pipefail
 
@@ -21,7 +21,7 @@ source .venv/bin/activate
 
 MODEL_RUN="${MODEL_RUN:-metaworld_selfattention}"
 DATASET_NAME="${DATASET_NAME:-metaworld_eval}"
-OUTPUT_FILENAME="${OUTPUT_FILENAME:-planning_snellius_results.txt}"
+OUTPUT_FILENAME="${OUTPUT_FILENAME:-planning_results_100/planning_snellius_results.txt}"
 
 TASKS=(
   "reach-v3"
