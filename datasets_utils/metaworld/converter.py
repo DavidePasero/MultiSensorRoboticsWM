@@ -77,6 +77,8 @@ def infer_shapes(src_file, merge_gripper):
         for key in ("object_1_xyz", "object_2_xyz", "bool_contact"):
             if key in episode_group:
                 shapes[key] = episode_group[key].shape[1:]
+        if "success" in episode_group:
+            shapes["success"] = episode_group["success"].shape[1:]
         return shapes
 
     raise ValueError("No episodes found in source Meta-World dataset.")
@@ -183,6 +185,15 @@ def convert_dataset(src_path, dst_path, merge_gripper=True):
                     shapes["bool_contact"],
                     np.bool_,
                 )
+            success_ds = None
+            if "success" in shapes:
+                success_ds = create_dataset(
+                    dst_file,
+                    "success",
+                    total_steps,
+                    shapes["success"],
+                    np.bool_,
+                )
             ep_len_ds = dst_file.create_dataset(
                 "ep_len",
                 data=episode_lengths,
@@ -269,6 +280,10 @@ def convert_dataset(src_path, dst_path, merge_gripper=True):
                     bool_contact_ds[sl] = require_episode_key(
                         episode_group, "bool_contact"
                     )[()].astype(np.bool_)
+                if success_ds is not None:
+                    success_ds[sl] = require_episode_key(
+                        episode_group, "success"
+                    )[()].astype(np.bool_)
 
                 episode_idx_ds[sl] = episode_idx
                 step_idx_ds[sl] = np.arange(num_steps, dtype=np.int64)
@@ -288,6 +303,10 @@ def convert_dataset(src_path, dst_path, merge_gripper=True):
 
             ep_len_ds.attrs["description"] = "Length of each episode in steps."
             ep_offset_ds.attrs["description"] = "Starting global row offset for each episode."
+            if success_ds is not None:
+                success_ds.attrs["description"] = (
+                    "Per-step MetaWorld task-success flag aligned to each saved observation."
+                )
             dst_file.attrs["source_dataset"] = str(src_path)
             dst_file.attrs["env_names_json"] = json.dumps(env_names)
             dst_file.attrs["merge_gripper_into_proprio"] = bool(merge_gripper)

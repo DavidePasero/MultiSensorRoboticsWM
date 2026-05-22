@@ -259,11 +259,164 @@ def get_episodes_length(dataset, episodes):
     return np.array(lengths)
 
 
+def dataset_has_key(dataset, key: str) -> bool:
+    h5_path = getattr(dataset, "h5_path", None)
+    if h5_path is None:
+        return key in dataset.column_names
+    with h5py.File(h5_path, "r") as f:
+        return key in f
+
+
+def success_mask(dataset, success_key: str) -> np.ndarray:
+    values = np.asarray(dataset.get_col_data(success_key))
+    return values.reshape(values.shape[0], -1).any(axis=1)
+
+
+class DatasetColumnFilter:
+    """Hide bookkeeping columns from evaluate_from_dataset."""
+
+    def __init__(self, dataset, hidden_keys):
+        self.dataset = dataset
+        self.hidden_keys = set(hidden_keys)
+
+    @property
+    def column_names(self):
+        return [key for key in self.dataset.column_names if key not in self.hidden_keys]
+
+    def get_col_data(self, col: str):
+        return self.dataset.get_col_data(col)
+
+    def get_row_data(self, row_idx):
+        return self.dataset.get_row_data(row_idx)
+
+    def load_chunk(self, episodes_idx, start, end):
+        chunks = self.dataset.load_chunk(episodes_idx, start, end)
+        for chunk in chunks:
+            for key in self.hidden_keys:
+                chunk.pop(key, None)
+        return chunks
+
+
+def sample_fixed_offset_rows(dataset, ep_indices, cfg, eval_env_idx, goal_offset_steps):
+    col_name = "episode_idx" if "episode_idx" in dataset.column_names else "ep_idx"
+    episode_idx = np.asarray(dataset.get_col_data(col_name)).reshape(-1)
+    step_idx = np.asarray(dataset.get_col_data("step_idx")).reshape(-1)
+    episode_len = get_episodes_length(dataset, ep_indices)
+    max_start_idx = episode_len - goal_offset_steps - 1
+    max_start_idx_dict = {
+        ep_id: max_start_idx[i] for i, ep_id in enumerate(ep_indices)
+    }
+    valid_mask = step_idx <= np.array([max_start_idx_dict[ep] for ep in episode_idx])
+
+    if eval_env_idx is not None and "env_idx" in dataset.column_names:
+        valid_mask &= (
+            np.asarray(dataset.get_col_data("env_idx")).reshape(-1) == eval_env_idx
+        )
+        print(
+            f"Filtering dataset to env_idx={eval_env_idx} "
+            f"({cfg.world.get('metaworld_env_name', 'unknown env')})."
+        )
+
+    valid_indices = np.nonzero(valid_mask)[0]
+    print(len(valid_indices), "valid starting points found for evaluation.")
+    if len(valid_indices) < cfg.eval.num_eval:
+        raise ValueError(
+            f"Not enough valid planning starts. Found {len(valid_indices)}, "
+            f"need {cfg.eval.num_eval}."
+        )
+
+    g = np.random.default_rng(cfg.seed)
+    selected_rows = np.sort(
+        valid_indices[
+            g.choice(len(valid_indices), size=cfg.eval.num_eval, replace=False)
+        ]
+    )
+    rows = dataset.get_row_data(selected_rows)
+    print(selected_rows)
+    return rows[col_name], rows["step_idx"]
+
+
+def sample_first_success_rows(dataset, ep_indices, cfg, eval_env_idx, success_key):
+    if not dataset_has_key(dataset, success_key):
+        raise KeyError(
+            f"First-success goal sampling requires dataset key '{success_key}'. "
+            "Regenerate and reconvert the eval dataset with the updated collector."
+        )
+
+    col_name = "episode_idx" if "episode_idx" in dataset.column_names else "ep_idx"
+    episode_idx = np.asarray(dataset.get_col_data(col_name)).reshape(-1)
+    step_idx = np.asarray(dataset.get_col_data("step_idx")).reshape(-1)
+    successes = success_mask(dataset, success_key)
+    env_idx = None
+    if eval_env_idx is not None and "env_idx" in dataset.column_names:
+        env_idx = np.asarray(dataset.get_col_data("env_idx")).reshape(-1)
+        print(
+            f"Filtering dataset to env_idx={eval_env_idx} "
+            f"({cfg.world.get('metaworld_env_name', 'unknown env')})."
+        )
+
+    start_offset = int(cfg.eval.goal_offset_steps)
+    candidate_episodes = []
+    candidate_starts = []
+
+    for ep_id in ep_indices:
+        mask = episode_idx == ep_id
+        if env_idx is not None:
+            mask &= env_idx == eval_env_idx
+        if not np.any(mask):
+            continue
+
+        steps = step_idx[mask].astype(np.int64)
+        ep_successes = successes[mask]
+        order = np.argsort(steps)
+        steps = steps[order]
+        ep_successes = ep_successes[order]
+
+        success_positions = np.flatnonzero(ep_successes)
+        if success_positions.size == 0:
+            continue
+
+        goal_step = int(steps[success_positions[0]])
+        start_step = goal_step - start_offset
+        if start_step < int(steps[0]) or not np.any(steps == start_step):
+            continue
+
+        candidate_episodes.append(int(ep_id))
+        candidate_starts.append(start_step)
+
+    print(
+        len(candidate_episodes),
+        "valid first-success starting points found for evaluation.",
+    )
+    if len(candidate_episodes) < cfg.eval.num_eval:
+        raise ValueError(
+            "Not enough first-success planning starts. Found "
+            f"{len(candidate_episodes)}, need {cfg.eval.num_eval}. "
+            f"Collect more successful episodes or lower eval.goal_offset_steps."
+        )
+
+    g = np.random.default_rng(cfg.seed)
+    selected = np.sort(
+        g.choice(len(candidate_episodes), size=cfg.eval.num_eval, replace=False)
+    )
+    return (
+        np.asarray(candidate_episodes, dtype=np.int64)[selected],
+        np.asarray(candidate_starts, dtype=np.int64)[selected],
+    )
+
+
 def get_dataset(cfg, dataset_name):
     dataset_path = Path(cfg.cache_dir or swm.data.utils.get_cache_dir())
+    keys_to_load = cfg.dataset.get("keys_to_load", None)
+    if keys_to_load is not None:
+        keys_to_load = list(keys_to_load)
+        if str(cfg.eval.get("goal_sampling", "fixed_offset")) == "first_success":
+            success_key = str(cfg.eval.get("goal_success_key", "success"))
+            if success_key not in keys_to_load:
+                keys_to_load.append(success_key)
     dataset = swm.data.HDF5Dataset(
         dataset_name,
-        keys_to_load=cfg.dataset.get("keys_to_load", None),
+        keys_to_load=keys_to_load,
         keys_to_cache=cfg.dataset.keys_to_cache,
         cache_dir=dataset_path,
     )
@@ -415,44 +568,39 @@ def run(cfg: DictConfig):
         else Path(__file__).parent
     )
 
-    # sample the episodes and the starting indices
-    episode_len = get_episodes_length(dataset, ep_indices)
-    max_start_idx = episode_len - cfg.eval.goal_offset_steps - 1
-    max_start_idx_dict = {ep_id: max_start_idx[i] for i, ep_id in enumerate(ep_indices)}
-    # Map each dataset row’s episode_idx to its max_start_idx
-    col_name = "episode_idx" if "episode_idx" in dataset.column_names else "ep_idx"
-    max_start_per_row = np.array(
-        [max_start_idx_dict[ep_id] for ep_id in dataset.get_col_data(col_name)]
-    )
-
-    # remove rows that are too close to the end of the episode
-    valid_mask = dataset.get_col_data("step_idx") <= max_start_per_row
-
     # For multi-task SensorMetaWorld datasets, keep only episodes for the env
     # instantiated by world.metaworld_env_name.
     eval_env_idx = resolve_dataset_env_idx(dataset, cfg)
-    if eval_env_idx is not None:
-        valid_mask = valid_mask & (dataset.get_col_data("env_idx") == eval_env_idx)
+
+    goal_sampling = str(cfg.eval.get("goal_sampling", "fixed_offset"))
+    dataset_for_eval = dataset
+    eval_goal_offset_steps = int(cfg.eval.goal_offset_steps)
+    success_key = None
+
+    if goal_sampling == "first_success":
+        success_key = str(cfg.eval.get("goal_success_key", "success"))
+        eval_goal_offset_steps = int(cfg.eval.goal_offset_steps) + 1
+        dataset_for_eval = DatasetColumnFilter(dataset, hidden_keys={success_key})
         print(
-            f"Filtering dataset to env_idx={eval_env_idx} "
-            f"({cfg.world.get('metaworld_env_name', 'unknown env')})."
+            f"Using the first `{success_key}=True` step as the goal, with starts "
+            f"{cfg.eval.goal_offset_steps} dataset steps before it."
         )
 
-    valid_indices = np.nonzero(valid_mask)[0]
-    print(valid_mask.sum(), "valid starting points found for evaluation.")
-
-    g = np.random.default_rng(cfg.seed)
-    random_episode_indices = g.choice(
-        len(valid_indices) - 1, size=cfg.eval.num_eval, replace=False
-    )
-
-    # sort increasingly to avoid issues with HDF5Dataset indexing
-    random_episode_indices = np.sort(valid_indices[random_episode_indices])
-
-    print(random_episode_indices)
-
-    eval_episodes = dataset.get_row_data(random_episode_indices)[col_name]
-    eval_start_idx = dataset.get_row_data(random_episode_indices)["step_idx"]
+        eval_episodes, eval_start_idx = sample_first_success_rows(
+            dataset=dataset,
+            ep_indices=ep_indices,
+            cfg=cfg,
+            eval_env_idx=eval_env_idx,
+            success_key=success_key,
+        )
+    else:
+        eval_episodes, eval_start_idx = sample_fixed_offset_rows(
+            dataset=dataset,
+            ep_indices=ep_indices,
+            cfg=cfg,
+            eval_env_idx=eval_env_idx,
+            goal_offset_steps=eval_goal_offset_steps,
+        )
 
     if len(eval_episodes) < cfg.eval.num_eval:
         raise ValueError("Not enough episodes with sufficient length for evaluation.")
@@ -461,9 +609,9 @@ def run(cfg: DictConfig):
 
     start_time = time.time()
     metrics = world.evaluate_from_dataset(
-        dataset,
+        dataset_for_eval,
         start_steps=eval_start_idx.tolist(),
-        goal_offset_steps=cfg.eval.goal_offset_steps,
+        goal_offset_steps=eval_goal_offset_steps,
         eval_budget=cfg.eval.eval_budget,
         episodes_idx=eval_episodes.tolist(),
         callables=OmegaConf.to_container(cfg.eval.get("callables"), resolve=True),

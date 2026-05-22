@@ -1,0 +1,526 @@
+nohup: ignoring input
+Planning suite report directory: /home/disco/Desktop/Projects/MultiSensorRoboticsWM/documentation/planning_suite_20260522_120402
+Tasks: door-open-v3 drawer-close-v3 drawer-open-v3 reach-v3
+Raw run records: /home/disco/Desktop/Projects/MultiSensorRoboticsWM/documentation/planning_suite_20260522_120402/planning_runs.jsonl
+Parallel jobs: 4
+=== TASK=door-open-v3 MODEL=metaworld_gated RUN=1 SEED=42 ===
+Command: /home/disco/Desktop/Projects/MultiSensorRoboticsWM/.venv/bin/python eval.py --config-name=metaworld policy=metaworld_gated/metaworld_gated_epoch_3 eval.dataset_name=metaworld_eval world.metaworld_env_name=door-open-v3 seed=42 eval.num_eval=10 eval.goal_offset_steps=25 eval.eval_budget=100 plan_config.horizon=25 plan_config.receding_horizon=3 plan_config.action_block=1 output.filename=planning_suite_eval_20260522_120402.txt 
+=== TASK=door-open-v3 MODEL=metaworld_concatproject_2 RUN=3 SEED=44 ===
+Command: /home/disco/Desktop/Projects/MultiSensorRoboticsWM/.venv/bin/python eval.py --config-name=metaworld policy=metaworld_concatproject_2/metaworld_concatproject_2_epoch_3 eval.dataset_name=metaworld_eval world.metaworld_env_name=door-open-v3 seed=44 eval.num_eval=10 eval.goal_offset_steps=25 eval.eval_budget=100 plan_config.horizon=25 plan_config.receding_horizon=3 plan_config.action_block=1 output.filename=planning_suite_eval_20260522_120402.txt 
+=== TASK=door-open-v3 MODEL=metaworld_concatproject_2 RUN=2 SEED=43 ===
+Command: /home/disco/Desktop/Projects/MultiSensorRoboticsWM/.venv/bin/python eval.py --config-name=metaworld policy=metaworld_concatproject_2/metaworld_concatproject_2_epoch_3 eval.dataset_name=metaworld_eval world.metaworld_env_name=door-open-v3 seed=43 eval.num_eval=10 eval.goal_offset_steps=25 eval.eval_budget=100 plan_config.horizon=25 plan_config.receding_horizon=3 plan_config.action_block=1 output.filename=planning_suite_eval_20260522_120402.txt 
+=== TASK=door-open-v3 MODEL=metaworld_concatproject_2 RUN=1 SEED=42 ===
+Command: /home/disco/Desktop/Projects/MultiSensorRoboticsWM/.venv/bin/python eval.py --config-name=metaworld policy=metaworld_concatproject_2/metaworld_concatproject_2_epoch_3 eval.dataset_name=metaworld_eval world.metaworld_env_name=door-open-v3 seed=42 eval.num_eval=10 eval.goal_offset_steps=25 eval.eval_budget=100 plan_config.horizon=25 plan_config.receding_horizon=3 plan_config.action_block=1 output.filename=planning_suite_eval_20260522_120402.txt 
+[2026-05-22 12:04:06,050][OpenGL.acceleratesupport][INFO] - No OpenGL_accelerate module loaded: No module named 'OpenGL_accelerate'
+[2026-05-22 12:04:06,134][OpenGL.acceleratesupport][INFO] - No OpenGL_accelerate module loaded: No module named 'OpenGL_accelerate'
+[2026-05-22 12:04:06,293][OpenGL.acceleratesupport][INFO] - No OpenGL_accelerate module loaded: No module named 'OpenGL_accelerate'
+[2026-05-22 12:04:06,403][OpenGL.acceleratesupport][INFO] - No OpenGL_accelerate module loaded: No module named 'OpenGL_accelerate'
+12:04:08.503 | INFO    (13636, stable_worldmodel.world) | 🌍🌍🌍 World swm/SensorMetaWorld-v0 initialized 🌍🌍🌍
+12:04:08.503 | INFO    (13636, stable_worldmodel.world) | 🕹️ 🕹️ 🕹️ Action space 🕹️ 🕹️ 🕹️
+12:04:08.503 | INFO    (13636, stable_worldmodel.world) | Box(-1.0, 1.0, (10, 4), float32)
+12:04:08.503 | INFO    (13636, stable_worldmodel.world) | 👁️ 👁️ 👁️ Observation space 👁️ 👁️ 👁️
+12:04:08.503 | INFO    (13636, stable_worldmodel.world) | Dict('depth': Box(0.01, 10.0, (10, 128, 128), float32), 'force_torque': Box(-inf, inf, (10, 6), float32), 'proprio': Box([[-inf -inf -inf -inf -inf -inf -inf  -1.]
+ [-inf -inf -inf -inf -inf -inf -inf  -1.]
+ [-inf -inf -inf -inf -inf -inf -inf  -1.]
+ [-inf -inf -inf -inf -inf -inf -inf  -1.]
+ [-inf -inf -inf -inf -inf -inf -inf  -1.]
+ [-inf -inf -inf -inf -inf -inf -inf  -1.]
+ [-inf -inf -inf -inf -inf -inf -inf  -1.]
+ [-inf -inf -inf -inf -inf -inf -inf  -1.]
+ [-inf -inf -inf -inf -inf -inf -inf  -1.]
+ [-inf -inf -inf -inf -inf -inf -inf  -1.]], [[inf inf inf inf inf inf inf  1.]
+ [inf inf inf inf inf inf inf  1.]
+ [inf inf inf inf inf inf inf  1.]
+ [inf inf inf inf inf inf inf  1.]
+ [inf inf inf inf inf inf inf  1.]
+ [inf inf inf inf inf inf inf  1.]
+ [inf inf inf inf inf inf inf  1.]
+ [inf inf inf inf inf inf inf  1.]
+ [inf inf inf inf inf inf inf  1.]
+ [inf inf inf inf inf inf inf  1.]], (10, 8), float32), 'state': Box([[-0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.3     0.4     0.1499]
+ [-0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.3     0.4     0.1499]
+ [-0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.3     0.4     0.1499]
+ [-0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.3     0.4     0.1499]
+ [-0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.3     0.4     0.1499]
+ [-0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.3     0.4     0.1499]
+ [-0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.3     0.4     0.1499]
+ [-0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.3     0.4     0.1499]
+ [-0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.3     0.4     0.1499]
+ [-0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.3     0.4     0.1499]], [[ 0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+   0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+  -0.2     0.5     0.1501]
+ [ 0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+   0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+  -0.2     0.5     0.1501]
+ [ 0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+   0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+  -0.2     0.5     0.1501]
+ [ 0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+   0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+  -0.2     0.5     0.1501]
+ [ 0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+   0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+  -0.2     0.5     0.1501]
+ [ 0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+   0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+  -0.2     0.5     0.1501]
+ [ 0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+   0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+  -0.2     0.5     0.1501]
+ [ 0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+   0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+  -0.2     0.5     0.1501]
+ [ 0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+   0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+  -0.2     0.5     0.1501]
+ [ 0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+   0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+  -0.2     0.5     0.1501]], (10, 39), float64), 'tactile': Box(0.0, 1.5, (10, 2, 64, 64), float32))
+12:04:08.503 | INFO    (13636, stable_worldmodel.world) | ⚗️ ⚗️ ⚗️ Variation space ⚗️ ⚗️ ⚗️
+task:
+    index: Discrete(50)
+[2026-05-22 12:04:08,510][root][INFO] - Cached 'action' from '/home/disco/.stable_worldmodel/metaworld_eval.h5'
+[2026-05-22 12:04:08,514][root][INFO] - Cached 'proprio' from '/home/disco/.stable_worldmodel/metaworld_eval.h5'
+[2026-05-22 12:04:08,518][root][INFO] - Cached 'force_torque' from '/home/disco/.stable_worldmodel/metaworld_eval.h5'
+12:04:08.533 | INFO    (13637, stable_worldmodel.world) | 🌍🌍🌍 World swm/SensorMetaWorld-v0 initialized 🌍🌍🌍
+12:04:08.533 | INFO    (13637, stable_worldmodel.world) | 🕹️ 🕹️ 🕹️ Action space 🕹️ 🕹️ 🕹️
+12:04:08.533 | INFO    (13637, stable_worldmodel.world) | Box(-1.0, 1.0, (10, 4), float32)
+12:04:08.533 | INFO    (13637, stable_worldmodel.world) | 👁️ 👁️ 👁️ Observation space 👁️ 👁️ 👁️
+12:04:08.533 | INFO    (13637, stable_worldmodel.world) | Dict('depth': Box(0.01, 10.0, (10, 128, 128), float32), 'force_torque': Box(-inf, inf, (10, 6), float32), 'proprio': Box([[-inf -inf -inf -inf -inf -inf -inf  -1.]
+ [-inf -inf -inf -inf -inf -inf -inf  -1.]
+ [-inf -inf -inf -inf -inf -inf -inf  -1.]
+ [-inf -inf -inf -inf -inf -inf -inf  -1.]
+ [-inf -inf -inf -inf -inf -inf -inf  -1.]
+ [-inf -inf -inf -inf -inf -inf -inf  -1.]
+ [-inf -inf -inf -inf -inf -inf -inf  -1.]
+ [-inf -inf -inf -inf -inf -inf -inf  -1.]
+ [-inf -inf -inf -inf -inf -inf -inf  -1.]
+ [-inf -inf -inf -inf -inf -inf -inf  -1.]], [[inf inf inf inf inf inf inf  1.]
+ [inf inf inf inf inf inf inf  1.]
+ [inf inf inf inf inf inf inf  1.]
+ [inf inf inf inf inf inf inf  1.]
+ [inf inf inf inf inf inf inf  1.]
+ [inf inf inf inf inf inf inf  1.]
+ [inf inf inf inf inf inf inf  1.]
+ [inf inf inf inf inf inf inf  1.]
+ [inf inf inf inf inf inf inf  1.]
+ [inf inf inf inf inf inf inf  1.]], (10, 8), float32), 'state': Box([[-0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.3     0.4     0.1499]
+ [-0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.3     0.4     0.1499]
+ [-0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.3     0.4     0.1499]
+ [-0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.3     0.4     0.1499]
+ [-0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.3     0.4     0.1499]
+ [-0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.3     0.4     0.1499]
+ [-0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.3     0.4     0.1499]
+ [-0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.3     0.4     0.1499]
+ [-0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.3     0.4     0.1499]
+ [-0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.3     0.4     0.1499]], [[ 0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+   0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+  -0.2     0.5     0.1501]
+ [ 0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+   0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+  -0.2     0.5     0.1501]
+ [ 0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+   0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+  -0.2     0.5     0.1501]
+ [ 0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+   0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+  -0.2     0.5     0.1501]
+ [ 0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+   0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+  -0.2     0.5     0.1501]
+ [ 0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+   0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+  -0.2     0.5     0.1501]
+ [ 0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+   0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+  -0.2     0.5     0.1501]
+ [ 0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+   0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+  -0.2     0.5     0.1501]
+ [ 0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+   0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+  -0.2     0.5     0.1501]
+ [ 0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+   0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+  -0.2     0.5     0.1501]], (10, 39), float64), 'tactile': Box(0.0, 1.5, (10, 2, 64, 64), float32))
+12:04:08.533 | INFO    (13637, stable_worldmodel.world) | ⚗️ ⚗️ ⚗️ Variation space ⚗️ ⚗️ ⚗️
+task:
+    index: Discrete(50)
+[2026-05-22 12:04:08,536][root][INFO] - Cached 'action' from '/home/disco/.stable_worldmodel/metaworld_eval.h5'
+[2026-05-22 12:04:08,537][root][INFO] - Cached 'proprio' from '/home/disco/.stable_worldmodel/metaworld_eval.h5'
+[2026-05-22 12:04:08,537][root][INFO] - Cached 'force_torque' from '/home/disco/.stable_worldmodel/metaworld_eval.h5'
+12:04:08.641 | INFO    (13638, stable_worldmodel.world) | 🌍🌍🌍 World swm/SensorMetaWorld-v0 initialized 🌍🌍🌍
+12:04:08.641 | INFO    (13638, stable_worldmodel.world) | 🕹️ 🕹️ 🕹️ Action space 🕹️ 🕹️ 🕹️
+12:04:08.641 | INFO    (13638, stable_worldmodel.world) | Box(-1.0, 1.0, (10, 4), float32)
+12:04:08.641 | INFO    (13638, stable_worldmodel.world) | 👁️ 👁️ 👁️ Observation space 👁️ 👁️ 👁️
+12:04:08.641 | INFO    (13638, stable_worldmodel.world) | Dict('depth': Box(0.01, 10.0, (10, 128, 128), float32), 'force_torque': Box(-inf, inf, (10, 6), float32), 'proprio': Box([[-inf -inf -inf -inf -inf -inf -inf  -1.]
+ [-inf -inf -inf -inf -inf -inf -inf  -1.]
+ [-inf -inf -inf -inf -inf -inf -inf  -1.]
+ [-inf -inf -inf -inf -inf -inf -inf  -1.]
+ [-inf -inf -inf -inf -inf -inf -inf  -1.]
+ [-inf -inf -inf -inf -inf -inf -inf  -1.]
+ [-inf -inf -inf -inf -inf -inf -inf  -1.]
+ [-inf -inf -inf -inf -inf -inf -inf  -1.]
+ [-inf -inf -inf -inf -inf -inf -inf  -1.]
+ [-inf -inf -inf -inf -inf -inf -inf  -1.]], [[inf inf inf inf inf inf inf  1.]
+ [inf inf inf inf inf inf inf  1.]
+ [inf inf inf inf inf inf inf  1.]
+ [inf inf inf inf inf inf inf  1.]
+ [inf inf inf inf inf inf inf  1.]
+ [inf inf inf inf inf inf inf  1.]
+ [inf inf inf inf inf inf inf  1.]
+ [inf inf inf inf inf inf inf  1.]
+ [inf inf inf inf inf inf inf  1.]
+ [inf inf inf inf inf inf inf  1.]], (10, 8), float32), 'state': Box([[-0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.3     0.4     0.1499]
+ [-0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.3     0.4     0.1499]
+ [-0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.3     0.4     0.1499]
+ [-0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.3     0.4     0.1499]
+ [-0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.3     0.4     0.1499]
+ [-0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.3     0.4     0.1499]
+ [-0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.3     0.4     0.1499]
+ [-0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.3     0.4     0.1499]
+ [-0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.3     0.4     0.1499]
+ [-0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.3     0.4     0.1499]], [[ 0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+   0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+  -0.2     0.5     0.1501]
+ [ 0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+   0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+  -0.2     0.5     0.1501]
+ [ 0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+   0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+  -0.2     0.5     0.1501]
+ [ 0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+   0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+  -0.2     0.5     0.1501]
+ [ 0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+   0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+  -0.2     0.5     0.1501]
+ [ 0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+   0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+  -0.2     0.5     0.1501]
+ [ 0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+   0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+  -0.2     0.5     0.1501]
+ [ 0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+   0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+  -0.2     0.5     0.1501]
+ [ 0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+   0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+  -0.2     0.5     0.1501]
+ [ 0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+   0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+  -0.2     0.5     0.1501]], (10, 39), float64), 'tactile': Box(0.0, 1.5, (10, 2, 64, 64), float32))
+12:04:08.641 | INFO    (13638, stable_worldmodel.world) | ⚗️ ⚗️ ⚗️ Variation space ⚗️ ⚗️ ⚗️
+task:
+    index: Discrete(50)
+[2026-05-22 12:04:08,644][root][INFO] - Cached 'action' from '/home/disco/.stable_worldmodel/metaworld_eval.h5'
+[2026-05-22 12:04:08,645][root][INFO] - Cached 'proprio' from '/home/disco/.stable_worldmodel/metaworld_eval.h5'
+[2026-05-22 12:04:08,646][root][INFO] - Cached 'force_torque' from '/home/disco/.stable_worldmodel/metaworld_eval.h5'
+12:04:08.733 | INFO    (13641, stable_worldmodel.world) | 🌍🌍🌍 World swm/SensorMetaWorld-v0 initialized 🌍🌍🌍
+12:04:08.734 | INFO    (13641, stable_worldmodel.world) | 🕹️ 🕹️ 🕹️ Action space 🕹️ 🕹️ 🕹️
+12:04:08.734 | INFO    (13641, stable_worldmodel.world) | Box(-1.0, 1.0, (10, 4), float32)
+12:04:08.734 | INFO    (13641, stable_worldmodel.world) | 👁️ 👁️ 👁️ Observation space 👁️ 👁️ 👁️
+12:04:08.734 | INFO    (13641, stable_worldmodel.world) | Dict('depth': Box(0.01, 10.0, (10, 128, 128), float32), 'force_torque': Box(-inf, inf, (10, 6), float32), 'proprio': Box([[-inf -inf -inf -inf -inf -inf -inf  -1.]
+ [-inf -inf -inf -inf -inf -inf -inf  -1.]
+ [-inf -inf -inf -inf -inf -inf -inf  -1.]
+ [-inf -inf -inf -inf -inf -inf -inf  -1.]
+ [-inf -inf -inf -inf -inf -inf -inf  -1.]
+ [-inf -inf -inf -inf -inf -inf -inf  -1.]
+ [-inf -inf -inf -inf -inf -inf -inf  -1.]
+ [-inf -inf -inf -inf -inf -inf -inf  -1.]
+ [-inf -inf -inf -inf -inf -inf -inf  -1.]
+ [-inf -inf -inf -inf -inf -inf -inf  -1.]], [[inf inf inf inf inf inf inf  1.]
+ [inf inf inf inf inf inf inf  1.]
+ [inf inf inf inf inf inf inf  1.]
+ [inf inf inf inf inf inf inf  1.]
+ [inf inf inf inf inf inf inf  1.]
+ [inf inf inf inf inf inf inf  1.]
+ [inf inf inf inf inf inf inf  1.]
+ [inf inf inf inf inf inf inf  1.]
+ [inf inf inf inf inf inf inf  1.]
+ [inf inf inf inf inf inf inf  1.]], (10, 8), float32), 'state': Box([[-0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.3     0.4     0.1499]
+ [-0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.3     0.4     0.1499]
+ [-0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.3     0.4     0.1499]
+ [-0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.3     0.4     0.1499]
+ [-0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.3     0.4     0.1499]
+ [-0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.3     0.4     0.1499]
+ [-0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.3     0.4     0.1499]
+ [-0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.3     0.4     0.1499]
+ [-0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.3     0.4     0.1499]
+ [-0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.525   0.348  -0.0525 -1.        -inf    -inf    -inf    -inf    -inf
+     -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf    -inf
+  -0.3     0.4     0.1499]], [[ 0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+   0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+  -0.2     0.5     0.1501]
+ [ 0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+   0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+  -0.2     0.5     0.1501]
+ [ 0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+   0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+  -0.2     0.5     0.1501]
+ [ 0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+   0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+  -0.2     0.5     0.1501]
+ [ 0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+   0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+  -0.2     0.5     0.1501]
+ [ 0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+   0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+  -0.2     0.5     0.1501]
+ [ 0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+   0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+  -0.2     0.5     0.1501]
+ [ 0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+   0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+  -0.2     0.5     0.1501]
+ [ 0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+   0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+  -0.2     0.5     0.1501]
+ [ 0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+   0.525   1.025   0.7     1.         inf     inf     inf     inf     inf
+      inf     inf     inf     inf     inf     inf     inf     inf     inf
+  -0.2     0.5     0.1501]], (10, 39), float64), 'tactile': Box(0.0, 1.5, (10, 2, 64, 64), float32))
+12:04:08.734 | INFO    (13641, stable_worldmodel.world) | ⚗️ ⚗️ ⚗️ Variation space ⚗️ ⚗️ ⚗️
+task:
+    index: Discrete(50)
+[2026-05-22 12:04:08,737][root][INFO] - Cached 'action' from '/home/disco/.stable_worldmodel/metaworld_eval.h5'
+[2026-05-22 12:04:08,738][root][INFO] - Cached 'proprio' from '/home/disco/.stable_worldmodel/metaworld_eval.h5'
+[2026-05-22 12:04:08,739][root][INFO] - Cached 'force_torque' from '/home/disco/.stable_worldmodel/metaworld_eval.h5'
+Planning suite stopped after the first failed run. See /home/disco/Desktop/Projects/MultiSensorRoboticsWM/documentation/planning_suite_20260522_120402/planning_runs.log

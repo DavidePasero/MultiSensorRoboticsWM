@@ -25,13 +25,9 @@ OUTPUT_FILENAME="${OUTPUT_FILENAME:-planning_snellius_results.txt}"
 
 TASKS=(
   "reach-v3"
-  "push-v3"
-  "pick-place-v3"
   "drawer-open-v3"
   "drawer-close-v3"
   "door-open-v3"
-  "button-press-v3"
-  "hammer-v3"
 )
 
 SEEDS=(42 43 44)

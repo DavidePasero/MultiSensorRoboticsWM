@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-set -u -o pipefail
+set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
@@ -15,10 +15,16 @@ if [[ -z "$PYTHON_BIN" ]]; then
 fi
 
 export STABLEWM_HOME="${STABLEWM_HOME:-$HOME/.stable_worldmodel}"
+export MUJOCO_GL="${MUJOCO_GL:-egl}"
+export HYDRA_FULL_ERROR="${HYDRA_FULL_ERROR:-1}"
+export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
+export MPLCONFIGDIR="${MPLCONFIGDIR:-/tmp/matplotlib-${USER:-user}}"
+mkdir -p "$MPLCONFIGDIR"
 DATASET_NAME="${DATASET_NAME:-metaworld_eval}"
 NUM_RUNS="${NUM_RUNS:-3}"
 BASE_SEED="${BASE_SEED:-42}"
-PARALLEL_JOBS="${PARALLEL_JOBS:-4}"
+PARALLEL_JOBS="${PARALLEL_JOBS:-1}"
+export PARALLEL_JOBS
 NUM_EVAL="${NUM_EVAL:-10}"
 GOAL_OFFSET_STEPS="${GOAL_OFFSET_STEPS:-25}"
 EVAL_BUDGET="${EVAL_BUDGET:-50}"
@@ -198,36 +204,46 @@ PY
 }
 
 declare -a MODELS=(
-  "random_policy|random|"
-  "metaworld_force_torque|metaworld_force_torque|"
-  "metaworld_gated|metaworld_gated|"
-  "metaworld_pixels|metaworld_pixels|"
-  "metaworld_selfattention|metaworld_selfattention|"
-  "metaworld_selfattention_masked_all|metaworld_selfattention_masked|"
-  "metaworld_selfattention_masked_pixels_only|metaworld_selfattention_masked|eval.drop_modalities=[depth,tactile,proprio,force_torque]"
+  "metaworld_concatproject_2|metaworld_concatproject_2/metaworld_concatproject_2_epoch_3|"
+  "metaworld_gated|metaworld_gated/metaworld_gated_epoch_3|"
+  "metaworld_gated_masked|metaworld_gated_masked/metaworld_gated_masked_epoch_3|"
+  "metaworld_pixels|metaworld_pixels/metaworld_pixels_epoch_3|"
+  "metaworld_selfattention|metaworld_selfattention/metaworld_selfatt_epoch_3|"
+  "metaworld_selfattention_masked|metaworld_selfattention_masked/metaworld_selfatt_masked_epoch_3|"
 )
 
 if [[ -n "${METAWORLD_TASKS:-}" ]]; then
   IFS=',' read -r -a TASKS <<< "$METAWORLD_TASKS"
 else
-  mapfile -t TASKS < <("$PYTHON_BIN" - <<'PY'
-from pathlib import Path
-import json
-import h5py
-import os
-
-stablewm_home = Path(os.environ.get("STABLEWM_HOME", Path.home() / ".stable_worldmodel"))
-dataset_name = os.environ.get("DATASET_NAME", "metaworld_eval")
-path = stablewm_home / f"{dataset_name}.h5"
-with h5py.File(path, "r") as f:
-    names_json = f.attrs.get("env_names_json", None)
-if names_json is None:
-    raise SystemExit("Dataset is missing env_names_json; set METAWORLD_TASKS manually.")
-for name in json.loads(names_json):
-    print(name)
-PY
-)
+  TASKS=("door-open-v3" "drawer-close-v3" "drawer-open-v3" "reach-v3")
 fi
+
+validate_model_checkpoints() {
+  local missing=0
+  local model_label
+  local policy_ref
+  local extra_override
+  local ckpt_path
+
+  for model_spec in "${MODELS[@]}"; do
+    IFS='|' read -r model_label policy_ref extra_override <<< "$model_spec"
+    if [[ "$policy_ref" == "random" ]]; then
+      continue
+    fi
+
+    ckpt_path="$STABLEWM_HOME/${policy_ref}_object.ckpt"
+    if [[ ! -f "$ckpt_path" ]]; then
+      echo "Missing checkpoint for $model_label: $ckpt_path" >&2
+      missing=1
+    fi
+  done
+
+  if (( missing != 0 )); then
+    exit 1
+  fi
+}
+
+validate_model_checkpoints
 
 echo "Planning suite report directory: $REPORT_DIR"
 echo "Tasks: ${TASKS[*]}"
@@ -261,14 +277,22 @@ run_one() {
     cmd+=("$extra_override")
   fi
 
-  echo "=== TASK=$task MODEL=$model_label RUN=$run_idx SEED=$seed ===" | tee -a "$RAW_LOG"
-  local output
-  output="$("${cmd[@]}" 2>&1)"
-  local status=$?
-  printf '%s\n' "$output" >> "$RAW_LOG"
+  local run_log="$REPORT_DIR/${task}__${model_label}__run_${run_idx}.log"
+  local cmd_line
+  printf -v cmd_line '%q ' "${cmd[@]}"
+
+  {
+    echo "=== TASK=$task MODEL=$model_label RUN=$run_idx SEED=$seed ==="
+    echo "Command: $cmd_line"
+  } | tee -a "$RAW_LOG" "$run_log"
+
+  set +e
+  "${cmd[@]}" 2>&1 | tee -a "$RAW_LOG" "$run_log"
+  local status=${PIPESTATUS[0]}
+  set -e
 
   local metrics_json
-  metrics_json="$(printf '%s\n' "$output" | awk '/^METRICS_JSON=/{sub(/^METRICS_JSON=/,""); print}' | tail -n 1)"
+  metrics_json="$(awk '/^METRICS_JSON=/{sub(/^METRICS_JSON=/,""); print}' "$run_log" | tail -n 1)"
 
   (
     flock -x 9
@@ -282,6 +306,11 @@ run_one() {
         "$seed" \
         "$metrics_json"
     else
+      local failure_status="$status"
+      if [[ -z "$metrics_json" && "$failure_status" -eq 0 ]]; then
+        failure_status=1
+      fi
+
       append_failure_record \
         "$RAW_JSONL" \
         "$task" \
@@ -289,13 +318,46 @@ run_one() {
         "$policy_ref" \
         "$run_idx" \
         "$seed" \
-        "$status"
+        "$failure_status"
     fi
     render_report >/dev/null
   ) 9>"$LOCK_FILE"
+
+  if [[ $status -ne 0 ]]; then
+    echo "Planning run failed with exit code $status. See $run_log" >&2
+    return "$status"
+  fi
+
+  if [[ -z "$metrics_json" ]]; then
+    echo "Planning run finished without METRICS_JSON. See $run_log" >&2
+    return 1
+  fi
 }
 
 render_report >/dev/null
+
+stop_running_jobs() {
+  jobs -pr | xargs -r kill 2>/dev/null || true
+  wait 2>/dev/null || true
+}
+
+wait_for_one_job() {
+  local status
+
+  set +e
+  wait -n
+  status=$?
+  set -e
+
+  running_jobs=$((running_jobs - 1))
+  if (( status != 0 )); then
+    stop_running_jobs
+    echo "Planning suite stopped after the first failed run. See $RAW_LOG" >&2
+    exit "$status"
+  fi
+}
+
+trap 'stop_running_jobs' INT TERM
 
 running_jobs=0
 for task in "${TASKS[@]}"; do
@@ -304,19 +366,21 @@ for task in "${TASKS[@]}"; do
 
     for ((run_idx=1; run_idx<=NUM_RUNS; run_idx++)); do
       seed=$((BASE_SEED + run_idx - 1))
-      run_one "$task" "$model_label" "$policy_ref" "$extra_override" "$run_idx" "$seed" &
-      ((running_jobs+=1))
-      if (( running_jobs >= PARALLEL_JOBS )); then
-        wait -n
-        ((running_jobs-=1))
+      if (( PARALLEL_JOBS <= 1 )); then
+        run_one "$task" "$model_label" "$policy_ref" "$extra_override" "$run_idx" "$seed"
+      else
+        run_one "$task" "$model_label" "$policy_ref" "$extra_override" "$run_idx" "$seed" &
+        running_jobs=$((running_jobs + 1))
+        if (( running_jobs >= PARALLEL_JOBS )); then
+          wait_for_one_job
+        fi
       fi
     done
   done
 done
 
 while (( running_jobs > 0 )); do
-  wait -n
-  ((running_jobs-=1))
+  wait_for_one_job
 done
 
 render_report >/dev/null
