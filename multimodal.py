@@ -17,7 +17,7 @@ IMAGE_CHANNEL_COUNTS = (1, 2, 3, 4)
 DEFAULT_MODALITY_CHANNELS = {
     "pixels": 3,
     "depth": 1,
-    "tactile": 2,
+    "tactile": 1,
 }
 
 
@@ -46,7 +46,8 @@ def get_vector_modality_configs(obs_cfg):
 
 
 def _flatten_image_sequence(x: torch.Tensor):
-    x = x.float()
+    x = torch.as_tensor(x)
+    input_is_float = torch.is_floating_point(x)
 
     if x.ndim == 4:
         x = x.unsqueeze(2)
@@ -67,13 +68,14 @@ def _flatten_image_sequence(x: torch.Tensor):
             "Unable to infer channel dimension for image modality. "
             f"Got tensor shape {tuple(x.shape)}."
         )
-    return flat, b, t
+    return flat, b, t, input_is_float
 
 
 def _preprocess_image_sequence(x: torch.Tensor, *, img_size=None, mean=None, std=None):
-    x, b, t = _flatten_image_sequence(x)
+    x, b, t, input_is_float = _flatten_image_sequence(x)
+    x = x.float()
 
-    if x.numel() and x.amax() > 1:
+    if not input_is_float:
         x = x / 255.0
 
     if img_size is not None and x.shape[-2:] != (img_size, img_size):
@@ -187,10 +189,12 @@ class CNNImageEncoder(BaseModalityEncoder):
         source,
         in_channels,
         output_dim,
+        img_size=None,
         hidden_dims=(32, 64, 128),
         head_hidden_dim=None,
     ):
         super().__init__(source=source, output_dim=output_dim)
+        self.img_size = img_size
         hidden_dims = list(hidden_dims)
         if not hidden_dims:
             raise ValueError("CNNImageEncoder requires at least one hidden dimension.")
@@ -229,7 +233,10 @@ class CNNImageEncoder(BaseModalityEncoder):
         )
 
     def forward(self, info):
-        img_size, mean, std = _default_image_preprocess(self.source)
+        img_size, mean, std = _default_image_preprocess(
+            self.source,
+            img_size=self.img_size,
+        )
         x, b, t = _preprocess_image_sequence(
             self.get_input(info),
             img_size=img_size,
@@ -383,6 +390,7 @@ def build_modality_encoder(cfg, name, mod_cfg):
             source=source,
             in_channels=in_channels,
             output_dim=output_dim,
+            img_size=mod_cfg.get("img_size"),
             hidden_dims=mod_cfg.get("hidden_dims", (32, 64, 128)),
             head_hidden_dim=mod_cfg.get("head_hidden_dim"),
         )

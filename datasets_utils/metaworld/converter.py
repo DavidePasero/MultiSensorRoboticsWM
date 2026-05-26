@@ -16,6 +16,17 @@ from datasets_utils.metaworld.preprocessor import (
 
 
 EE_POSITION_SOURCE_KEYS = ("ee_position", "ee_xyz")
+OPTIONAL_EPISODE_KEYS = (
+    "object_1_xyz",
+    "object_2_xyz",
+    "bool_contact",
+    "success",
+    "qpos",
+    "qvel",
+    "rand_vec",
+    "target_pos",
+    "hand_start_pos",
+)
 
 
 def iter_episodes(src_file):
@@ -46,6 +57,7 @@ def find_first_present_key(episode_group, candidates: tuple[str, ...]) -> str | 
 
 
 def infer_shapes(src_file, merge_gripper):
+    optional_shapes = {}
     for _env_name, _episode_name, episode_group in iter_episodes(src_file):
         shapes = {
             "pixels": require_episode_key(episode_group, "pixels").shape[1:],
@@ -74,14 +86,29 @@ def infer_shapes(src_file, merge_gripper):
                 episode_group, ee_position_source
             ).shape[1:]
 
-        for key in ("object_1_xyz", "object_2_xyz", "bool_contact"):
-            if key in episode_group:
-                shapes[key] = episode_group[key].shape[1:]
-        if "success" in episode_group:
-            shapes["success"] = episode_group["success"].shape[1:]
-        return shapes
+        for key in OPTIONAL_EPISODE_KEYS:
+            if key not in episode_group:
+                continue
+            shape = episode_group[key].shape[1:]
+            prev = optional_shapes.get(key)
+            if prev is None:
+                optional_shapes[key] = shape
+            elif prev != shape:
+                optional_shapes[key] = False
 
-    raise ValueError("No episodes found in source Meta-World dataset.")
+    if not optional_shapes and "shapes" not in locals():
+        raise ValueError("No episodes found in source Meta-World dataset.")
+
+    for key, shape in optional_shapes.items():
+        if shape is False:
+            print(
+                f"Skipping optional key '{key}' because episode shapes differ across "
+                "the dataset and the flat converter requires a consistent shape."
+            )
+            continue
+        shapes[key] = shape
+    return shapes
+
 
 
 def create_dataset(out_file, name, total_steps, feature_shape, dtype):
@@ -126,10 +153,10 @@ def convert_dataset(src_path, dst_path, merge_gripper=True):
                 dst_file, "pixels", total_steps, shapes["pixels"], np.uint8
             )
             depth_ds = create_dataset(
-                dst_file, "depth", total_steps, shapes["depth"], np.float32
+                dst_file, "depth", total_steps, shapes["depth"], np.float16
             )
             tactile_ds = create_dataset(
-                dst_file, "tactile", total_steps, shapes["tactile"], np.float32
+                dst_file, "tactile", total_steps, shapes["tactile"], np.uint8
             )
             proprio_ds = create_dataset(
                 dst_file, "proprio", total_steps, shapes["proprio"], np.float32
@@ -194,6 +221,51 @@ def convert_dataset(src_path, dst_path, merge_gripper=True):
                     shapes["success"],
                     np.bool_,
                 )
+            qpos_ds = None
+            if "qpos" in shapes:
+                qpos_ds = create_dataset(
+                    dst_file,
+                    "qpos",
+                    total_steps,
+                    shapes["qpos"],
+                    np.float32,
+                )
+            qvel_ds = None
+            if "qvel" in shapes:
+                qvel_ds = create_dataset(
+                    dst_file,
+                    "qvel",
+                    total_steps,
+                    shapes["qvel"],
+                    np.float32,
+                )
+            rand_vec_ds = None
+            if "rand_vec" in shapes:
+                rand_vec_ds = create_dataset(
+                    dst_file,
+                    "rand_vec",
+                    total_steps,
+                    shapes["rand_vec"],
+                    np.float32,
+                )
+            target_pos_ds = None
+            if "target_pos" in shapes:
+                target_pos_ds = create_dataset(
+                    dst_file,
+                    "target_pos",
+                    total_steps,
+                    shapes["target_pos"],
+                    np.float32,
+                )
+            hand_start_pos_ds = None
+            if "hand_start_pos" in shapes:
+                hand_start_pos_ds = create_dataset(
+                    dst_file,
+                    "hand_start_pos",
+                    total_steps,
+                    shapes["hand_start_pos"],
+                    np.float32,
+                )
             ep_len_ds = dst_file.create_dataset(
                 "ep_len",
                 data=episode_lengths,
@@ -226,8 +298,12 @@ def convert_dataset(src_path, dst_path, merge_gripper=True):
                 sl = slice(offset, offset + num_steps)
 
                 pixels_ds[sl] = require_episode_key(episode_group, "pixels")[()]
-                depth_ds[sl] = require_episode_key(episode_group, "depth")[()]
-                tactile_ds[sl] = require_episode_key(episode_group, "tactile")[()]
+                depth_ds[sl] = require_episode_key(
+                    episode_group, "depth"
+                )[()].astype(np.float16)
+                tactile_ds[sl] = require_episode_key(
+                    episode_group, "tactile"
+                )[()].astype(np.uint8)
                 action_ds[sl] = require_episode_key(episode_group, "action")[()]
 
                 force_torque = require_episode_key(
@@ -284,6 +360,26 @@ def convert_dataset(src_path, dst_path, merge_gripper=True):
                     success_ds[sl] = require_episode_key(
                         episode_group, "success"
                     )[()].astype(np.bool_)
+                if qpos_ds is not None:
+                    qpos_ds[sl] = require_episode_key(
+                        episode_group, "qpos"
+                    )[()].astype(np.float32)
+                if qvel_ds is not None:
+                    qvel_ds[sl] = require_episode_key(
+                        episode_group, "qvel"
+                    )[()].astype(np.float32)
+                if rand_vec_ds is not None:
+                    rand_vec_ds[sl] = require_episode_key(
+                        episode_group, "rand_vec"
+                    )[()].astype(np.float32)
+                if target_pos_ds is not None:
+                    target_pos_ds[sl] = require_episode_key(
+                        episode_group, "target_pos"
+                    )[()].astype(np.float32)
+                if hand_start_pos_ds is not None:
+                    hand_start_pos_ds[sl] = require_episode_key(
+                        episode_group, "hand_start_pos"
+                    )[()].astype(np.float32)
 
                 episode_idx_ds[sl] = episode_idx
                 step_idx_ds[sl] = np.arange(num_steps, dtype=np.int64)

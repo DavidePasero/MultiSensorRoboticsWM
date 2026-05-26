@@ -23,11 +23,7 @@ RESULTS_DIR="${RESULTS_DIR:-$ROOT_DIR/experiments/results/probing_suite_$TIMESTA
 mkdir -p "$RESULTS_DIR"
 
 declare -a MODELS=(
-  "metaworld_gated|$STABLEWM_HOME/metaworld_gated/metaworld_gated_epoch_2_object.ckpt"
-  "metaworld_gated_masked|$STABLEWM_HOME/metaworld_gated_masked/metaworld_gated_masked_epoch_2_object.ckpt"
-  "metaworld_pixels|$STABLEWM_HOME/metaworld_pixels/metaworld_pixels_epoch_2_object.ckpt"
-  "metaworld_selfattention|$STABLEWM_HOME/metaworld_selfattention/metaworld_selfatt_epoch_2_object.ckpt"
-  "metaworld_selfattention_masked|$STABLEWM_HOME/metaworld_selfattention_masked/metaworld_selfatt_masked_epoch_2_object.ckpt"
+  "metaworld_selfattention_button_press|$STABLEWM_HOME/metaworld_selfattention_button_press/metaworld_selfattention_button_press_epoch_9_object.ckpt"
 )
 
 echo "Probing suite output directory: $RESULTS_DIR"

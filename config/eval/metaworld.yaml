@@ -22,6 +22,11 @@ dataset:
     - proprio
     - force_torque
     - action
+    - qpos
+    - qvel
+    - rand_vec
+    - target_pos
+    - hand_start_pos
     - episode_idx
     - step_idx
     - env_idx
@@ -52,12 +57,20 @@ eval:
   callables:
     - method: _set_state
       args:
-        proprio:
-          value: proprio
+        qpos:
+          value: qpos
+        qvel:
+          value: qvel
+        rand_vec:
+          value: rand_vec
+        target_pos:
+          value: target_pos
+        hand_start_pos:
+          value: hand_start_pos
     - method: _set_goal_state
       args:
-        goal_state:
-          value: goal_proprio
+        target_pos:
+          value: goal_target_pos
 
 output:
   filename: metaworld_results.txt

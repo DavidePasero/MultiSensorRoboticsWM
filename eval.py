@@ -2,7 +2,8 @@ import os
 import json
 from collections import OrderedDict
 
-os.environ["MUJOCO_GL"] = "egl"
+os.environ.setdefault("MUJOCO_GL", "egl")
+os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
 
 import time
 from pathlib import Path
@@ -448,6 +449,18 @@ def compute_final_latent_distance_metrics(policy, world):
                 image_sources.add(source)
 
         def _ensure_sequence_value(source, value):
+            if source == "pixels":
+                if value.ndim == 4:
+                    return value.unsqueeze(1)
+                return value
+            if source == "depth":
+                if value.ndim == 3:
+                    return value.unsqueeze(1)
+                return value
+            if source == "tactile":
+                if value.ndim == 4:
+                    return value.unsqueeze(1)
+                return value
             if source in image_sources:
                 if value.ndim == 4:
                     return value.unsqueeze(1)
@@ -607,36 +620,41 @@ def run(cfg: DictConfig):
 
     world.set_policy(policy)
 
-    start_time = time.time()
-    metrics = world.evaluate_from_dataset(
-        dataset_for_eval,
-        start_steps=eval_start_idx.tolist(),
-        goal_offset_steps=eval_goal_offset_steps,
-        eval_budget=cfg.eval.eval_budget,
-        episodes_idx=eval_episodes.tolist(),
-        callables=OmegaConf.to_container(cfg.eval.get("callables"), resolve=True),
-        video_path=results_path,
-    )
-    if cfg.get("policy", "random") != "random":
-        metrics.update(compute_final_latent_distance_metrics(policy, world))
-    end_time = time.time()
+    try:
+        start_time = time.time()
+        metrics = world.evaluate_from_dataset(
+            dataset_for_eval,
+            start_steps=eval_start_idx.tolist(),
+            goal_offset_steps=eval_goal_offset_steps,
+            eval_budget=cfg.eval.eval_budget,
+            episodes_idx=eval_episodes.tolist(),
+            callables=OmegaConf.to_container(
+                cfg.eval.get("callables"), resolve=True
+            ),
+            video_path=results_path,
+        )
+        if cfg.get("policy", "random") != "random":
+            metrics.update(compute_final_latent_distance_metrics(policy, world))
+        end_time = time.time()
 
-    print(metrics)
-    print("METRICS_JSON=" + json.dumps(_make_json_safe(metrics), sort_keys=True))
+        print(metrics)
+        print("METRICS_JSON=" + json.dumps(_make_json_safe(metrics), sort_keys=True))
 
-    results_path = results_path / cfg.output.filename
-    results_path.parent.mkdir(parents=True, exist_ok=True)
+        results_path = results_path / cfg.output.filename
+        results_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with results_path.open("a") as f:
-        f.write("\n")  # separate from previous runs
+        with results_path.open("a") as f:
+            f.write("\n")  # separate from previous runs
 
-        f.write("==== CONFIG ====\n")
-        f.write(OmegaConf.to_yaml(cfg))
-        f.write("\n")
+            f.write("==== CONFIG ====\n")
+            f.write(OmegaConf.to_yaml(cfg))
+            f.write("\n")
 
-        f.write("==== RESULTS ====\n")
-        f.write(f"metrics: {metrics}\n")
-        f.write(f"evaluation_time: {end_time - start_time} seconds\n")
+            f.write("==== RESULTS ====\n")
+            f.write(f"metrics: {metrics}\n")
+            f.write(f"evaluation_time: {end_time - start_time} seconds\n")
+    finally:
+        world.close()
 
 
 if __name__ == "__main__":

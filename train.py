@@ -11,6 +11,7 @@ import lightning as pl
 import stable_pretraining as spt
 import stable_worldmodel as swm
 import torch
+from lightning.pytorch.core.optimizer import LightningOptimizer
 from lightning.pytorch.loggers import WandbLogger
 from omegaconf import OmegaConf
 
@@ -57,6 +58,193 @@ def lejepa_forward(self, batch, stage, cfg):
     losses_dict = {f"{stage}/{k}": v.detach() for k, v in output.items() if "loss" in k}
     self.log_dict(losses_dict, on_step=True, sync_dist=True)
     return output
+
+
+class GradNormLoggingModule(spt.Module):
+    def __init__(
+        self,
+        *args,
+        grad_norm_logging=None,
+        sigreg_weight: float = 1.0,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        grad_cfg = grad_norm_logging or {}
+        self._grad_norm_logging_enabled = bool(grad_cfg.get("enabled", False))
+        self._grad_norm_log_every_n_steps = max(
+            int(grad_cfg.get("log_every_n_steps", 50)),
+            1,
+        )
+        self._sigreg_weight = float(sigreg_weight)
+
+    def _should_log_grad_norms(self) -> bool:
+        return self._grad_norm_logging_enabled and (
+            self.global_step % self._grad_norm_log_every_n_steps == 0
+        )
+
+    @staticmethod
+    def _global_norm_from_grads(grads, *, device):
+        total = None
+        for grad in grads:
+            if grad is None:
+                continue
+            value = grad.detach().float().pow(2).sum()
+            total = value if total is None else total + value
+        if total is None:
+            return torch.zeros((), device=device)
+        return total.sqrt()
+
+    @staticmethod
+    def _global_norm_from_parameters(params, *, device):
+        total = None
+        for param in params:
+            grad = getattr(param, "grad", None)
+            if grad is None:
+                continue
+            value = grad.detach().float().pow(2).sum()
+            total = value if total is None else total + value
+        if total is None:
+            return torch.zeros((), device=device)
+        return total.sqrt()
+
+    def _compute_component_grad_norm_metrics(self, state):
+        encoder_params = [
+            param for param in self.model.encoder.parameters() if param.requires_grad
+        ]
+        if not encoder_params:
+            return {}
+
+        device = state["loss"].device
+        pred_grads = torch.autograd.grad(
+            state["pred_loss"],
+            encoder_params,
+            retain_graph=True,
+            allow_unused=True,
+        )
+        sigreg_grads = torch.autograd.grad(
+            state["sigreg_loss"],
+            encoder_params,
+            retain_graph=True,
+            allow_unused=True,
+        )
+
+        pred_norm = self._global_norm_from_grads(pred_grads, device=device)
+        sigreg_raw_norm = self._global_norm_from_grads(sigreg_grads, device=device)
+        sigreg_weighted_norm = sigreg_raw_norm * self._sigreg_weight
+        ratio = sigreg_weighted_norm / pred_norm.clamp_min(1e-12)
+
+        return {
+            "fit/grad_norm_encoder_pred": pred_norm,
+            "fit/grad_norm_encoder_sigreg_raw": sigreg_raw_norm,
+            "fit/grad_norm_encoder_sigreg_weighted": sigreg_weighted_norm,
+            "fit/grad_norm_encoder_sigreg_to_pred_ratio": ratio,
+        }
+
+    def _compute_total_grad_norm_metrics(self, state):
+        device = state["loss"].device
+        metrics = {
+            "fit/grad_norm_encoder_total": self._global_norm_from_parameters(
+                self.model.encoder.parameters(),
+                device=device,
+            ),
+        }
+
+        predictor_modules = [
+            getattr(self.model, "predictor", None),
+            getattr(self.model, "pred_proj", None),
+            getattr(self.model, "action_encoder", None),
+        ]
+        predictor_params = [
+            param
+            for module in predictor_modules
+            if module is not None
+            for param in module.parameters()
+            if param.requires_grad
+        ]
+        if predictor_params:
+            metrics["fit/grad_norm_predictor_total"] = (
+                self._global_norm_from_parameters(
+                    predictor_params,
+                    device=device,
+                )
+            )
+
+        return metrics
+
+    def training_step(self, batch, batch_idx):
+        if type(batch) is not dict:
+            raise ValueError(f"batch is expected to be a dict! Not as {type(batch)}")
+        batch["batch_idx"] = batch_idx
+        state = self(batch, stage="fit")
+
+        optimizers = self.optimizers()
+        if isinstance(optimizers, pl.pytorch.core.optimizer._MockOptimizer):
+            return state
+        elif not isinstance(optimizers, (list, tuple)):
+            optimizers = [optimizers]
+
+        schedulers = self.lr_schedulers()
+        if schedulers is None:
+            schedulers = []
+        elif not isinstance(schedulers, (list, tuple)):
+            schedulers = [schedulers]
+
+        if len(optimizers) > 1 and (len(optimizers) != len(schedulers)):
+            raise ValueError(
+                "When using more than one optimizer,"
+                " we need as many schedulers as optimizers!"
+                "if you don't want to use one, either use a "
+                "ConstantLR, or return None"
+            )
+        elif len(optimizers) == 1 and len(schedulers) == 0:
+            schedulers = [None]
+
+        if self._should_log_grad_norms():
+            self.log_dict(
+                self._compute_component_grad_norm_metrics(state),
+                on_step=True,
+                sync_dist=True,
+            )
+
+        self.manual_backward(state["loss"])
+        self.after_manual_backward()
+
+        if self._should_log_grad_norms():
+            self.log_dict(
+                self._compute_total_grad_norm_metrics(state),
+                on_step=True,
+                sync_dist=True,
+            )
+
+        zero_grad_opts = []
+        for idx, opt in enumerate(optimizers):
+            name = self._optimizer_index_to_name[idx]
+            if (batch_idx + 1) % self._optimizer_frequencies[name] != 0:
+                continue
+
+            clip_val = self._optimizer_gradient_clip_val[name]
+            clip_algo = self._optimizer_gradient_clip_algorithm[name]
+            if clip_val is not None:
+                self.clip_gradients(
+                    opt,
+                    gradient_clip_val=clip_val,
+                    gradient_clip_algorithm=clip_algo,
+                )
+
+            if not isinstance(opt, LightningOptimizer):
+                raise ValueError(
+                    "We received an optimizer that is not wrapped"
+                    "by lightning, make sure you define all your optimizers"
+                    f"in the configure_optimizers method! {opt}"
+                )
+            opt.step()
+            zero_grad_opts.append(opt)
+            if schedulers[idx] is not None:
+                schedulers[idx].step()
+
+        for opt in zero_grad_opts:
+            opt.zero_grad(set_to_none=True)
+        return state
 
 @hydra.main(version_base=None, config_path="./config/train", config_name="lewm")
 def run(cfg):
@@ -119,11 +307,13 @@ def run(cfg):
     }
 
     data_module = spt.data.DataModule(train=train, val=val)
-    world_model = spt.Module(
+    world_model = GradNormLoggingModule(
         model = world_model,
         sigreg = SIGReg(**cfg.loss.sigreg.kwargs),
         forward=partial(lejepa_forward, cfg=cfg),
         optim=optimizers,
+        grad_norm_logging=cfg.get("grad_norm_logging"),
+        sigreg_weight=cfg.loss.sigreg.weight,
     )
 
     ##########################
