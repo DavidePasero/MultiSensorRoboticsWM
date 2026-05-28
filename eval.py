@@ -449,21 +449,20 @@ def compute_final_latent_distance_metrics(policy, world):
                 image_sources.add(source)
 
         def _ensure_sequence_value(source, value):
-            if source == "pixels":
-                if value.ndim == 4:
-                    return value.unsqueeze(1)
-                return value
-            if source == "depth":
+            if source in image_sources:
+                expected_channels = {"pixels": 3, "depth": 1, "tactile": 1}.get(source)
+
                 if value.ndim == 3:
                     return value.unsqueeze(1)
-                return value
-            if source == "tactile":
+
                 if value.ndim == 4:
-                    return value.unsqueeze(1)
-                return value
-            if source in image_sources:
-                if value.ndim == 4:
-                    return value.unsqueeze(1)
+                    # Distinguish single-frame image tensors (B, C, H, W) or
+                    # (B, H, W, C) from sequence tensors such as (B, T, H, W).
+                    if expected_channels is not None:
+                        if value.shape[1] == expected_channels or value.shape[-1] == expected_channels:
+                            return value.unsqueeze(1)
+                    return value
+
                 return value
             if value.ndim == 2:
                 return value.unsqueeze(1)

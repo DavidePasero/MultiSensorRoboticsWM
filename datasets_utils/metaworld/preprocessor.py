@@ -120,7 +120,10 @@ def normalize_vector_with_stats(
 def get_saved_vector_normalizer(dataset, source: str, target: str):
     from stable_pretraining import data as dt
 
-    mean, std = load_vector_stats(dataset.h5_path, source)
+    if hasattr(dataset, "load_saved_vector_stats"):
+        mean, std = dataset.load_saved_vector_stats(source)
+    else:
+        mean, std = load_vector_stats(dataset.h5_path, source)
 
     def norm_fn(x):
         return normalize_vector_with_stats(x, mean, std)

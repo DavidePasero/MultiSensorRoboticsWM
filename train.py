@@ -16,6 +16,7 @@ from lightning.pytorch.loggers import WandbLogger
 from omegaconf import OmegaConf
 
 from datasets_utils.dataset_factory import get_dataset_adapter_from_config
+from datasets_utils.sharded_hdf5 import ShardLocalBatchSampler, uses_shard_local_batches
 from jepa import JEPA
 from module import ARPredictor, Embedder, MLP, SIGReg
 from multimodal import build_obs_encoder
@@ -58,6 +59,34 @@ def lejepa_forward(self, batch, stage, cfg):
     losses_dict = {f"{stage}/{k}": v.detach() for k, v in output.items() if "loss" in k}
     self.log_dict(losses_dict, on_step=True, sync_dist=True)
     return output
+
+
+def build_dataloader(dataset, loader_cfg, *, shuffle, drop_last, seed):
+    loader_cfg = dict(loader_cfg)
+    if uses_shard_local_batches(dataset):
+        batch_size = int(loader_cfg.pop("batch_size"))
+        loader_cfg.pop("shuffle", None)
+        loader_cfg.pop("drop_last", None)
+        batch_sampler = ShardLocalBatchSampler(
+            dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            drop_last=drop_last,
+            seed=int(seed),
+        )
+        return torch.utils.data.DataLoader(
+            dataset,
+            batch_sampler=batch_sampler,
+            **loader_cfg,
+        )
+
+    return torch.utils.data.DataLoader(
+        dataset,
+        **loader_cfg,
+        shuffle=shuffle,
+        drop_last=drop_last,
+        generator=torch.Generator().manual_seed(int(seed)),
+    )
 
 
 class GradNormLoggingModule(spt.Module):
@@ -256,13 +285,25 @@ def run(cfg):
     dataset, keys_to_load = dataset_adapter.build_dataset(cfg)
     dataset_adapter.populate_wm_dims(cfg, dataset, keys_to_load)
 
-    rnd_gen = torch.Generator().manual_seed(cfg.seed)
+    split_gen = torch.Generator().manual_seed(cfg.seed)
     train_set, val_set = spt.data.random_split(
-        dataset, lengths=[cfg.train_split, 1 - cfg.train_split], generator=rnd_gen
+        dataset, lengths=[cfg.train_split, 1 - cfg.train_split], generator=split_gen
     )
 
-    train = torch.utils.data.DataLoader(train_set, **cfg.loader,shuffle=True, drop_last=True, generator=rnd_gen)
-    val = torch.utils.data.DataLoader(val_set, **cfg.loader, shuffle=False, drop_last=False)
+    train = build_dataloader(
+        train_set,
+        cfg.loader,
+        shuffle=True,
+        drop_last=True,
+        seed=cfg.seed,
+    )
+    val = build_dataloader(
+        val_set,
+        cfg.loader,
+        shuffle=False,
+        drop_last=False,
+        seed=cfg.seed,
+    )
     
     ##############################
     ##       model / optim      ##

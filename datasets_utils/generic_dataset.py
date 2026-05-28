@@ -17,6 +17,25 @@ class GenericDatasetAdapter(DatasetInterface):
 
     def build_hdf5_dataset(self, cfg, keys_to_load, cache_dir=None):
         import stable_worldmodel as swm
+        from datasets_utils.sharded_hdf5 import ShardedHDF5Dataset
+
+        shard_glob = cfg.data.dataset.get("shard_glob")
+        shard_paths = cfg.data.dataset.get("shard_paths")
+        if shard_glob or shard_paths:
+            return ShardedHDF5Dataset(
+                shard_glob=shard_glob,
+                shard_paths=list(shard_paths or []),
+                frameskip=int(cfg.data.dataset.frameskip),
+                num_steps=int(cfg.data.dataset.num_steps),
+                keys_to_load=keys_to_load,
+                keys_to_cache=list(cfg.data.dataset.get("keys_to_cache", [])),
+                keys_to_merge=dict(cfg.data.dataset.get("keys_to_merge", {})),
+                cache_dir=cache_dir or swm.data.utils.get_cache_dir(),
+                transform=None,
+                max_cached_shards_per_worker=int(
+                    cfg.data.dataset.get("max_cached_shards_per_worker", 1)
+                ),
+            )
 
         return swm.data.HDF5Dataset(
             name=cfg.data.dataset.name,

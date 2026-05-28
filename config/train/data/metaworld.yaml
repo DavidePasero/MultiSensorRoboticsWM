@@ -3,6 +3,9 @@ dataset:
   name: metaworld
   num_steps: ${eval:'${wm.num_preds} + ${wm.history_size}'}
   frameskip: 1
+  shard_glob: null
+  shard_paths: []
+  max_cached_shards_per_worker: 1
   keys_to_load:
     - pixels
     - depth

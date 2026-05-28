@@ -26,16 +26,37 @@ class MetaWorldDatasetAdapter(GenericDatasetAdapter):
             type=Path,
             nargs="?",
             default=Path("~/.stable_worldmodel/metaworld.h5").expanduser(),
-            help="Output flat HDF5 file. Defaults to ~/.stable_worldmodel/metaworld.h5",
+            help=(
+                "Output flat HDF5 file. When --num-shards > 1, this is treated as "
+                "the output directory for the shard files."
+            ),
         )
         parser.add_argument(
             "--keep-gripper-separate",
             action="store_true",
             help="Do not append the scalar gripper state onto the proprio vector.",
         )
+        parser.add_argument(
+            "--num-shards",
+            type=int,
+            default=1,
+            help=(
+                "Number of flat HDF5 shards to write. Use >1 to split the dataset "
+                "by episode into multiple shard files."
+            ),
+        )
         return parser
 
     def convert_from_args(self, args):
+        if int(args.num_shards) > 1:
+            converter.convert_dataset_sharded(
+                src_path=args.src,
+                dst_dir=args.dst,
+                num_shards=int(args.num_shards),
+                merge_gripper=not args.keep_gripper_separate,
+            )
+            return
+
         converter.convert_dataset(
             src_path=args.src,
             dst_path=args.dst,
