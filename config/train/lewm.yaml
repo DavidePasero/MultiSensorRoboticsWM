@@ -20,6 +20,7 @@ trainer:
   accelerator: gpu
   precision: bf16
   gradient_clip_val: 1.0
+  num_sanity_val_steps: 1
 
 loader:
   batch_size: 128

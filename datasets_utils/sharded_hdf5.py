@@ -87,7 +87,9 @@ class ShardedHDF5Dataset(Dataset):
 
         global_lengths = []
         global_row_offset = 0
-        clip_indices = []
+        clip_shard_indices = []
+        clip_episode_indices = []
+        clip_start_indices = []
         shard_clip_indices = defaultdict(list)
 
         for shard_idx, shard_path in enumerate(self.shard_paths):
@@ -124,8 +126,10 @@ class ShardedHDF5Dataset(Dataset):
                     if length < num_steps * frameskip:
                         continue
                     for start in range(length - num_steps * frameskip + 1):
-                        sample_idx = len(clip_indices)
-                        clip_indices.append((shard_idx, ep_idx, start))
+                        sample_idx = len(clip_start_indices)
+                        clip_shard_indices.append(shard_idx)
+                        clip_episode_indices.append(ep_idx)
+                        clip_start_indices.append(start)
                         shard_clip_indices[shard_idx].append(sample_idx)
 
         global_lengths_arr = np.asarray(global_lengths, dtype=np.int64)
@@ -133,14 +137,18 @@ class ShardedHDF5Dataset(Dataset):
         if len(global_offsets) > 1:
             global_offsets[1:] = np.cumsum(global_lengths_arr[:-1], dtype=np.int64)
 
-        super().__init__(
-            lengths=global_lengths_arr,
-            offsets=global_offsets,
-            frameskip=frameskip,
-            num_steps=num_steps,
-            transform=transform,
-        )
-        self.clip_indices = clip_indices
+        # Avoid Dataset.__init__ here: it eagerly materializes a huge Python
+        # clip_indices list, which we replace anyway and which gets replicated
+        # poorly across DataLoader worker forks.
+        self.lengths = global_lengths_arr
+        self.offsets = global_offsets
+        self.frameskip = int(frameskip)
+        self.num_steps = int(num_steps)
+        self.span = self.num_steps * self.frameskip
+        self.transform = transform
+        self.clip_shard_indices = np.asarray(clip_shard_indices, dtype=np.int32)
+        self.clip_episode_indices = np.asarray(clip_episode_indices, dtype=np.int32)
+        self.clip_start_indices = np.asarray(clip_start_indices, dtype=np.int32)
         self.shard_clip_indices = {
             shard_idx: np.asarray(indices, dtype=np.int64)
             for shard_idx, indices in shard_clip_indices.items()
@@ -153,6 +161,16 @@ class ShardedHDF5Dataset(Dataset):
     @property
     def column_names(self) -> list[str]:
         return list(self._keys)
+
+    def __len__(self) -> int:
+        return int(self.clip_start_indices.shape[0])
+
+    def get_clip_location(self, idx: int) -> tuple[int, int, int]:
+        return (
+            int(self.clip_shard_indices[idx]),
+            int(self.clip_episode_indices[idx]),
+            int(self.clip_start_indices[idx]),
+        )
 
     def _evict_extra_shards(self) -> None:
         while len(self._active_shards) > self.max_cached_shards_per_worker:
@@ -211,7 +229,7 @@ class ShardedHDF5Dataset(Dataset):
         return self.transform(steps) if self.transform else steps
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
-        shard_idx, ep_idx, start = self.clip_indices[idx]
+        shard_idx, ep_idx, start = self.get_clip_location(idx)
         steps = self._load_slice_from_shard(
             shard_idx,
             ep_idx,
@@ -227,7 +245,7 @@ class ShardedHDF5Dataset(Dataset):
     ) -> list[dict]:
         chunk = []
         for sample_idx, s, e in zip(episodes_idx, start, end):
-            shard_idx, ep_idx, _ = self.clip_indices[int(sample_idx)]
+            shard_idx, ep_idx, _ = self.get_clip_location(int(sample_idx))
             steps = self._load_slice_from_shard(shard_idx, ep_idx, int(s), int(e))
             if "action" in steps:
                 steps["action"] = steps["action"].reshape(
@@ -341,7 +359,7 @@ class ShardLocalBatchSampler(Sampler[list[int]]):
 
         shard_to_positions = defaultdict(list)
         for outer_pos, base_idx in enumerate(outer_indices):
-            shard_idx = base_dataset.clip_indices[int(base_idx)][0]
+            shard_idx = base_dataset.get_clip_location(int(base_idx))[0]
             shard_to_positions[shard_idx].append(outer_pos)
         self._shard_to_positions = {
             shard_idx: np.asarray(positions, dtype=np.int64)
