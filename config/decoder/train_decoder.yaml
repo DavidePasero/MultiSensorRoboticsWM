@@ -1,0 +1,53 @@
+checkpoint: null
+model_config: null
+cache_dir: null
+dataset_name: null
+targets: null
+loss_weights: []
+output_dir: null
+seed: 0
+device: null
+
+training:
+  train_on: all
+  max_samples: 50000
+  train_fraction: 0.7
+  val_fraction: 0.15
+
+loader:
+  batch_size: 32
+  num_workers: 0
+
+trainer:
+  num_epochs: 50
+  patience: 10
+
+optimizer:
+  lr: 1e-3
+  weight_decay: 1e-4
+
+pixel_decoder:
+  image_size: 224
+  patch_size: 16
+  hidden_dim: 512
+  num_layers: 4
+  num_heads: 8
+  mlp_ratio: 4.0
+  dropout: 0.0
+
+evaluation:
+  contact_threshold: 0.5
+  force_contact_threshold: 1.0
+
+wandb:
+  enabled: true
+  image_log_every_n_epochs: 1
+  num_images: 8
+  image_targets: null
+  config:
+    entity: davide_pasero-university-of-amsterdam
+    project: le-thesis
+    name: null
+    id: null
+    resume: allow
+    log_model: false

@@ -12,6 +12,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Subset
+from omegaconf import OmegaConf
 
 REPO_ROOT = Path(__file__).resolve().parent
 if str(REPO_ROOT) not in sys.path:
@@ -34,22 +35,99 @@ from experiments.experiment_utils import (
 )
 from multimodal import get_enabled_modality_configs
 
+DEFAULT_DECODER_CONFIG_PATH = REPO_ROOT / "config" / "decoder" / "train_decoder.yaml"
+
+
+def _resolve_optional_path(path: Path | str | None) -> Path | None:
+    if path is None:
+        return None
+    path = Path(path).expanduser()
+    if path.is_absolute() or path.exists():
+        return path
+    repo_path = REPO_ROOT / path
+    return repo_path if repo_path.exists() else path
+
+
+def load_decoder_training_config(config_path: Path | None):
+    resolved_path = _resolve_optional_path(config_path)
+    if resolved_path is None or not resolved_path.exists():
+        return OmegaConf.create({}), resolved_path
+    return OmegaConf.load(resolved_path), resolved_path
+
+
+def _cfg_get(cfg, key: str, default=None):
+    return OmegaConf.select(cfg, key, default=default)
+
+
+def _plain_config_value(value):
+    if OmegaConf.is_config(value):
+        return OmegaConf.to_container(value, resolve=True)
+    return value
+
+
+def _cfg_list(value):
+    value = _plain_config_value(value)
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value.split()
+    return list(value)
+
+
+def _cfg_loss_weights(value):
+    value = _plain_config_value(value)
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        return [f"{key}={val}" for key, val in value.items()]
+    return list(value)
+
 
 def parse_args():
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument(
+        "--decoder-config",
+        type=Path,
+        default=DEFAULT_DECODER_CONFIG_PATH,
+        help="YAML config for decoder training defaults and WandB logging.",
+    )
+    pre_args, _ = pre_parser.parse_known_args()
+    decoder_cfg, decoder_config_path = load_decoder_training_config(
+        pre_args.decoder_config,
+    )
+
     parser = argparse.ArgumentParser(
         description=(
             "Train post-hoc decoders from frozen LeWM latents and evaluate "
             "encoded-state versus predicted-future reconstruction."
-        )
+        ),
+        parents=[pre_parser],
     )
-    parser.add_argument("checkpoint", type=str, help="Checkpoint path or run reference.")
-    parser.add_argument("--config", type=Path, default=None)
-    parser.add_argument("--cache-dir", type=Path, default=None)
-    parser.add_argument("--dataset-name", type=str, default=None)
+    parser.add_argument(
+        "checkpoint",
+        nargs="?",
+        default=_cfg_get(decoder_cfg, "checkpoint"),
+        help="Checkpoint path or run reference.",
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=_cfg_get(decoder_cfg, "model_config"),
+    )
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=_cfg_get(decoder_cfg, "cache_dir"),
+    )
+    parser.add_argument(
+        "--dataset-name",
+        type=str,
+        default=_cfg_get(decoder_cfg, "dataset_name"),
+    )
     parser.add_argument(
         "--targets",
         nargs="+",
-        default=None,
+        default=_cfg_list(_cfg_get(decoder_cfg, "targets")),
         help=(
             "Dataset keys to decode. Defaults to enabled observation modalities "
             "plus bool_contact when present."
@@ -58,51 +136,128 @@ def parse_args():
     parser.add_argument(
         "--loss-weight",
         action="append",
-        default=[],
+        default=_cfg_loss_weights(_cfg_get(decoder_cfg, "loss_weights")),
         metavar="KEY=VALUE",
         help="Optional per-target loss weight. Can be passed multiple times.",
     )
     parser.add_argument(
         "--train-on",
         choices=("all", "future"),
-        default="all",
+        default=_cfg_get(decoder_cfg, "training.train_on", "all"),
         help="Train decoders on all encoded clip steps or only predictor target steps.",
     )
-    parser.add_argument("--max-samples", type=int, default=50000)
-    parser.add_argument("--train-fraction", type=float, default=0.7)
-    parser.add_argument("--val-fraction", type=float, default=0.15)
-    parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--num-workers", type=int, default=0)
-    parser.add_argument("--num-epochs", type=int, default=50)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--weight-decay", type=float, default=1e-4)
-    parser.add_argument("--patience", type=int, default=10)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--device", type=str, default=None)
+    parser.add_argument(
+        "--max-samples",
+        type=int,
+        default=_cfg_get(decoder_cfg, "training.max_samples", 50000),
+    )
+    parser.add_argument(
+        "--train-fraction",
+        type=float,
+        default=_cfg_get(decoder_cfg, "training.train_fraction", 0.7),
+    )
+    parser.add_argument(
+        "--val-fraction",
+        type=float,
+        default=_cfg_get(decoder_cfg, "training.val_fraction", 0.15),
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=_cfg_get(decoder_cfg, "loader.batch_size", 32),
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=_cfg_get(decoder_cfg, "loader.num_workers", 0),
+    )
+    parser.add_argument(
+        "--num-epochs",
+        type=int,
+        default=_cfg_get(decoder_cfg, "trainer.num_epochs", 50),
+    )
+    parser.add_argument(
+        "--lr",
+        type=float,
+        default=_cfg_get(decoder_cfg, "optimizer.lr", 1e-3),
+    )
+    parser.add_argument(
+        "--weight-decay",
+        type=float,
+        default=_cfg_get(decoder_cfg, "optimizer.weight_decay", 1e-4),
+    )
+    parser.add_argument(
+        "--patience",
+        type=int,
+        default=_cfg_get(decoder_cfg, "trainer.patience", 10),
+    )
+    parser.add_argument("--seed", type=int, default=_cfg_get(decoder_cfg, "seed", 0))
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=_cfg_get(decoder_cfg, "device"),
+    )
     parser.add_argument(
         "--pixel-image-size",
         type=int,
-        default=224,
+        default=_cfg_get(decoder_cfg, "pixel_decoder.image_size", 224),
         help="Pixel decoder output size. Use 0 to decode to dataset-native size.",
     )
-    parser.add_argument("--pixel-patch-size", type=int, default=16)
-    parser.add_argument("--pixel-hidden-dim", type=int, default=512)
-    parser.add_argument("--pixel-num-layers", type=int, default=4)
-    parser.add_argument("--pixel-num-heads", type=int, default=8)
-    parser.add_argument("--pixel-mlp-ratio", type=float, default=4.0)
-    parser.add_argument("--pixel-dropout", type=float, default=0.0)
+    parser.add_argument(
+        "--pixel-patch-size",
+        type=int,
+        default=_cfg_get(decoder_cfg, "pixel_decoder.patch_size", 16),
+    )
+    parser.add_argument(
+        "--pixel-hidden-dim",
+        type=int,
+        default=_cfg_get(decoder_cfg, "pixel_decoder.hidden_dim", 512),
+    )
+    parser.add_argument(
+        "--pixel-num-layers",
+        type=int,
+        default=_cfg_get(decoder_cfg, "pixel_decoder.num_layers", 4),
+    )
+    parser.add_argument(
+        "--pixel-num-heads",
+        type=int,
+        default=_cfg_get(decoder_cfg, "pixel_decoder.num_heads", 8),
+    )
+    parser.add_argument(
+        "--pixel-mlp-ratio",
+        type=float,
+        default=_cfg_get(decoder_cfg, "pixel_decoder.mlp_ratio", 4.0),
+    )
+    parser.add_argument(
+        "--pixel-dropout",
+        type=float,
+        default=_cfg_get(decoder_cfg, "pixel_decoder.dropout", 0.0),
+    )
     parser.add_argument(
         "--force-contact-threshold",
         type=float,
-        default=1.0,
+        default=_cfg_get(decoder_cfg, "evaluation.force_contact_threshold", 1.0),
         help=(
             "Threshold on decoded force_torque vector norm for drift proxy metrics. "
             "This is in the decoder target scale, usually the model-normalized scale."
         ),
     )
-    parser.add_argument("--contact-threshold", type=float, default=0.5)
-    parser.add_argument("--output-dir", type=Path, default=None)
-    return parser.parse_args()
+    parser.add_argument(
+        "--contact-threshold",
+        type=float,
+        default=_cfg_get(decoder_cfg, "evaluation.contact_threshold", 0.5),
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=_cfg_get(decoder_cfg, "output_dir"),
+    )
+    args = parser.parse_args()
+    if args.checkpoint is None:
+        parser.error("checkpoint is required, either as an argument or in decoder config.")
+    args.decoder_runtime_config = decoder_cfg
+    args.decoder_config_path = decoder_config_path
+    return args
 
 
 def parse_loss_weights(items: list[str]) -> dict[str, float]:
@@ -235,6 +390,196 @@ def finalize_metrics(accumulator: dict[str, float], total_weight: int) -> dict[s
     if total_weight <= 0:
         raise ValueError("No samples were accumulated.")
     return {key: value / total_weight for key, value in accumulator.items()}
+
+
+def _wandb_enabled(decoder_cfg) -> bool:
+    return bool(_cfg_get(decoder_cfg, "wandb.enabled", False))
+
+
+def _wandb_image_targets(decoder_cfg):
+    return _cfg_list(_cfg_get(decoder_cfg, "wandb.image_targets"))
+
+
+def setup_wandb_logger(args, cfg, targets, *, resolved_model_config: Path):
+    decoder_cfg = args.decoder_runtime_config
+    if not _wandb_enabled(decoder_cfg):
+        return None
+
+    from lightning.pytorch.loggers import WandbLogger
+
+    wandb_config = _cfg_get(decoder_cfg, "wandb.config", {}) or {}
+    wandb_config = _plain_config_value(wandb_config)
+    wandb_config = {
+        key: value for key, value in dict(wandb_config).items() if value is not None
+    }
+    run_stem = Path(str(args.checkpoint)).name
+    wandb_config.setdefault("name", f"decoder_{run_stem}")
+    wandb_config.setdefault("resume", "allow")
+    wandb_config.setdefault("log_model", False)
+
+    logger = WandbLogger(**wandb_config)
+    logger.log_hyperparams(
+        {
+            "checkpoint": args.checkpoint,
+            "decoder_config": str(args.decoder_config_path),
+            "resolved_model_config": str(resolved_model_config),
+            "dataset_name": cfg.data.dataset.name,
+            "targets": targets,
+            "train_on": args.train_on,
+            "max_samples": args.max_samples,
+            "train_fraction": args.train_fraction,
+            "val_fraction": args.val_fraction,
+            "batch_size": args.batch_size,
+            "num_workers": args.num_workers,
+            "num_epochs": args.num_epochs,
+            "lr": args.lr,
+            "weight_decay": args.weight_decay,
+            "patience": args.patience,
+            "seed": args.seed,
+            "pixel_decoder": {
+                "image_size": args.pixel_image_size,
+                "patch_size": args.pixel_patch_size,
+                "hidden_dim": args.pixel_hidden_dim,
+                "num_layers": args.pixel_num_layers,
+                "num_heads": args.pixel_num_heads,
+                "mlp_ratio": args.pixel_mlp_ratio,
+                "dropout": args.pixel_dropout,
+            },
+        }
+    )
+    return logger
+
+
+def log_wandb_metrics(logger, prefix: str, metrics: dict[str, float], *, epoch: int):
+    if logger is None:
+        return
+    payload = {f"{prefix}/{key}": value for key, value in metrics.items()}
+    payload["epoch"] = epoch
+    logger.experiment.log(payload)
+
+
+def log_wandb_nested_metrics(logger, prefix: str, metrics, *, step: int):
+    if logger is None:
+        return
+    payload = {}
+    for split, split_metrics in metrics.items():
+        for mode, mode_metrics in split_metrics.items():
+            for key, value in mode_metrics.items():
+                payload[f"{prefix}/{split}/{mode}/{key}"] = value
+    if payload:
+        payload["final_step"] = step
+        logger.experiment.log(payload)
+
+
+def _display_channels_first_image(image: torch.Tensor) -> torch.Tensor:
+    image = image.detach().float().cpu()
+    image = torch.nan_to_num(image, nan=0.0, posinf=0.0, neginf=0.0)
+    if image.ndim != 3:
+        raise ValueError(f"Expected image tensor shaped (C,H,W), got {image.shape}.")
+
+    channels = image.shape[0]
+    if channels == 1:
+        return image.repeat(3, 1, 1)
+    if channels == 2:
+        image = torch.cat([image[0:1], image[1:2]], dim=-1)
+        return image.repeat(3, 1, 1)
+    return image[:3]
+
+
+def _truth_prediction_panel(
+    truth: torch.Tensor,
+    prediction: torch.Tensor,
+    spec,
+) -> np.ndarray:
+    truth = _display_channels_first_image(truth)
+    prediction = _display_channels_first_image(prediction)
+
+    if spec.image_normalization == "unit":
+        truth = truth.clamp(0.0, 1.0)
+        prediction = prediction.clamp(0.0, 1.0)
+    else:
+        lo = torch.minimum(truth.amin(), prediction.amin())
+        hi = torch.maximum(truth.amax(), prediction.amax())
+        denom = (hi - lo).clamp_min(1e-6)
+        truth = (truth - lo) / denom
+        prediction = (prediction - lo) / denom
+
+    gap = torch.ones(3, truth.shape[-2], 4, dtype=truth.dtype) * 0.5
+    panel = torch.cat([truth, gap, prediction], dim=-1)
+    panel = (panel.clamp(0.0, 1.0).permute(1, 2, 0).numpy() * 255).astype(np.uint8)
+    return panel
+
+
+@torch.no_grad()
+def log_wandb_reconstruction_images(
+    *,
+    logger,
+    decoder,
+    model,
+    loader,
+    specs,
+    cfg,
+    device,
+    epoch: int,
+    num_images: int,
+    image_targets: list[str] | None,
+):
+    if logger is None or num_images <= 0:
+        return
+
+    try:
+        import wandb
+    except ImportError as exc:
+        raise ImportError("wandb is required when wandb.enabled=true.") from exc
+
+    selected_targets = image_targets or [
+        name for name, spec in specs.items() if spec.kind == "image"
+    ]
+    selected_targets = [
+        name for name in selected_targets if name in specs and specs[name].kind == "image"
+    ]
+    if not selected_targets:
+        return
+
+    decoder.eval()
+    model.eval()
+    batch = next(iter(loader))
+    batch = batch_to_device(batch, device)
+    latents = compute_latents(model, batch, cfg)
+    target_batch = slice_target_batch(batch, specs, latents["future_slice"])
+    predictions = decoder(latents["predicted_future"])
+
+    payload = {}
+    for name in selected_targets:
+        spec = specs[name]
+        prediction = predictions[name]
+        target = prepare_decoder_target(target_batch[name], prediction, spec)
+
+        flat_prediction = prediction.reshape(-1, *prediction.shape[-3:])
+        flat_target = target.reshape(-1, *target.shape[-3:])
+        count = min(int(num_images), flat_prediction.shape[0])
+        images = []
+        for idx in range(count):
+            panel = _truth_prediction_panel(
+                flat_target[idx],
+                flat_prediction[idx],
+                spec,
+            )
+            images.append(
+                wandb.Image(
+                    panel,
+                    caption=(
+                        f"epoch={epoch} target={name} sample={idx} "
+                        "left=truth right=predicted_future"
+                    ),
+                )
+            )
+        if images:
+            payload[f"reconstruction/{name}"] = images
+
+    if payload:
+        payload["reconstruction/epoch"] = epoch
+        logger.experiment.log(payload)
 
 
 def run_decoder_epoch(
@@ -399,6 +744,12 @@ def main():
     available_columns = get_dataset_columns(cfg.data.dataset.name, cache_dir)
     targets = args.targets or default_targets(cfg, available_columns)
     validate_targets(targets, available_columns)
+    wandb_logger = setup_wandb_logger(
+        args,
+        cfg,
+        targets,
+        resolved_model_config=config_path,
+    )
 
     loss_weights = parse_loss_weights(args.loss_weight)
     extra_keys_to_load = [
@@ -468,6 +819,7 @@ def main():
 
     print(f"Loaded frozen model from {args.checkpoint}", flush=True)
     print(f"Resolved config: {config_path}", flush=True)
+    print(f"Decoder config: {args.decoder_config_path}", flush=True)
     print(f"Decoder targets: {targets}", flush=True)
     print(f"Latent dim: {input_dim}", flush=True)
 
@@ -498,6 +850,24 @@ def main():
             optimizer=None,
         )
         print_epoch(epoch, train_metrics, val_metrics)
+        log_wandb_metrics(wandb_logger, "train", train_metrics, epoch=epoch)
+        log_wandb_metrics(wandb_logger, "val", val_metrics, epoch=epoch)
+        image_every = int(
+            _cfg_get(args.decoder_runtime_config, "wandb.image_log_every_n_epochs", 1)
+        )
+        if image_every > 0 and epoch % image_every == 0:
+            log_wandb_reconstruction_images(
+                logger=wandb_logger,
+                decoder=decoder,
+                model=model,
+                loader=loaders["val"],
+                specs=specs,
+                cfg=cfg,
+                device=device,
+                epoch=epoch,
+                num_images=int(_cfg_get(args.decoder_runtime_config, "wandb.num_images", 4)),
+                image_targets=_wandb_image_targets(args.decoder_runtime_config),
+            )
         history.append({"epoch": epoch, "train": train_metrics, "val": val_metrics})
 
         if val_metrics["loss"] < best_val_loss:
@@ -528,6 +898,12 @@ def main():
         )
         for split, loader in loaders.items()
     }
+    log_wandb_nested_metrics(
+        wandb_logger,
+        "final",
+        split_results,
+        step=len(history) + 1,
+    )
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = args.output_dir or Path("experiments/results") / f"decoder_{timestamp}"
@@ -538,6 +914,7 @@ def main():
         "target_specs": {name: spec.to_dict() for name, spec in specs.items()},
         "input_dim": input_dim,
         "checkpoint": args.checkpoint,
+        "decoder_config": str(args.decoder_config_path),
         "resolved_config": str(config_path),
         "targets": targets,
         "train_on": args.train_on,
@@ -555,6 +932,7 @@ def main():
 
     metrics_payload = {
         "checkpoint": args.checkpoint,
+        "decoder_config": str(args.decoder_config_path),
         "resolved_config": str(config_path),
         "dataset_name": cfg.data.dataset.name,
         "targets": targets,
@@ -578,6 +956,9 @@ def main():
     print("\nTest predicted-future metrics:", flush=True)
     for key, value in split_results["test"]["predicted_future"].items():
         print(f"  {key}: {value:.6f}", flush=True)
+
+    if wandb_logger is not None:
+        wandb_logger.finalize("success")
 
 
 if __name__ == "__main__":

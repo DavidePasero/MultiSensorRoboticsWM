@@ -63,6 +63,7 @@ LOGGER_PID=$!
 trap cleanup EXIT INT TERM
 
 CHECKPOINT="${CHECKPOINT:-metaworld_selfattention_drawer_open_high_sigreg/metaworld_selfattention_drawer_open_high_sigreg_epoch_10}"
+DECODER_CONFIG="${DECODER_CONFIG:-config/decoder/train_decoder.yaml}"
 CACHE_DIR="${CACHE_DIR:-$STABLEWM_HOME}"
 DATASET_NAME="${DATASET_NAME:-metaworld_drawer_open}"
 TRAIN_ON="${TRAIN_ON:-all}"
@@ -116,6 +117,7 @@ fi
 
 echo "--- DECODER TRAINING CONFIG ---"
 echo "CHECKPOINT=$CHECKPOINT"
+echo "DECODER_CONFIG=$DECODER_CONFIG"
 echo "CACHE_DIR=$CACHE_DIR"
 echo "DATASET_NAME=$DATASET_NAME"
 echo "TARGETS=${TARGETS:-default}"
@@ -131,6 +133,7 @@ echo "-------------------------------"
 
 set +e
 srun python -u train_decoder.py "$CHECKPOINT" \
+  --decoder-config "$DECODER_CONFIG" \
   "${CONFIG_ARGS[@]}" \
   --cache-dir "$CACHE_DIR" \
   --dataset-name "$DATASET_NAME" \
