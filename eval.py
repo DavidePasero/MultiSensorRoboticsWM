@@ -415,10 +415,15 @@ def get_dataset(cfg, dataset_name):
             success_key = str(cfg.eval.get("goal_success_key", "success"))
             if success_key not in keys_to_load:
                 keys_to_load.append(success_key)
+
+    keys_to_cache = cfg.dataset.keys_to_cache
+    if bool(cfg.dataset.get("cache_all_loaded", False)):
+        keys_to_cache = keys_to_load
+
     dataset = swm.data.HDF5Dataset(
         dataset_name,
         keys_to_load=keys_to_load,
-        keys_to_cache=cfg.dataset.keys_to_cache,
+        keys_to_cache=keys_to_cache,
         cache_dir=dataset_path,
     )
     return dataset
@@ -525,11 +530,16 @@ def run(cfg: DictConfig):
     ep_indices, _ = np.unique(stats_dataset.get_col_data(col_name), return_index=True)
 
     process = {}
-    for col in cfg.dataset.keys_to_cache:
+    keys_to_process = cfg.dataset.get("keys_to_process", cfg.dataset.keys_to_cache)
+    for col in keys_to_process:
         if col in ["pixels"]:
             continue
         processor = preprocessing.StandardScaler()
-        col_data = stats_dataset.get_col_data(col)
+        col_data = np.asarray(stats_dataset.get_col_data(col))
+        if col_data.ndim == 1:
+            col_data = col_data[:, None]
+        else:
+            col_data = col_data.reshape(col_data.shape[0], -1)
         col_data = col_data[~np.isnan(col_data).any(axis=1)]
         processor.fit(col_data)
         process[col] = processor

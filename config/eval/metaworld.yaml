@@ -34,6 +34,11 @@ dataset:
     - action
     - proprio
     - force_torque
+  keys_to_process:
+    - action
+    - proprio
+    - force_torque
+  cache_all_loaded: false
 
 seed: 42
 policy: random

@@ -17,10 +17,13 @@ fi
 export STABLEWM_HOME="${STABLEWM_HOME:-$HOME/.stable_worldmodel}"
 export MUJOCO_GL="${MUJOCO_GL:-egl}"
 export HYDRA_FULL_ERROR="${HYDRA_FULL_ERROR:-1}"
+export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
 export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
 export MPLCONFIGDIR="${MPLCONFIGDIR:-/tmp/matplotlib-${USER:-user}}"
 mkdir -p "$MPLCONFIGDIR"
 DATASET_NAME="${DATASET_NAME:-metaworld_eval}"
+MODEL_SET="${MODEL_SET:-default}"
+CACHE_DATASET_IN_RAM="${CACHE_DATASET_IN_RAM:-0}"
 NUM_RUNS="${NUM_RUNS:-3}"
 BASE_SEED="${BASE_SEED:-42}"
 PARALLEL_JOBS="${PARALLEL_JOBS:-1}"
@@ -203,14 +206,31 @@ print(report_path)
 PY
 }
 
-declare -a MODELS=(
-  "metaworld_concatproject_2|metaworld_concatproject_2/metaworld_concatproject_2_epoch_3|"
-  "metaworld_gated|metaworld_gated/metaworld_gated_epoch_3|"
-  "metaworld_gated_masked|metaworld_gated_masked/metaworld_gated_masked_epoch_3|"
-  "metaworld_pixels|metaworld_pixels/metaworld_pixels_epoch_3|"
-  "metaworld_selfattention|metaworld_selfattention/metaworld_selfatt_epoch_3|"
-  "metaworld_selfattention_masked|metaworld_selfattention_masked/metaworld_selfatt_masked_epoch_3|"
-)
+case "$MODEL_SET" in
+  default)
+    declare -a MODELS=(
+      "metaworld_concatproject_2|metaworld_concatproject_2/metaworld_concatproject_2_epoch_3|"
+      "metaworld_gated|metaworld_gated/metaworld_gated_epoch_3|"
+      "metaworld_gated_masked|metaworld_gated_masked/metaworld_gated_masked_epoch_3|"
+      "metaworld_pixels|metaworld_pixels/metaworld_pixels_epoch_3|"
+      "metaworld_selfattention|metaworld_selfattention/metaworld_selfatt_epoch_3|"
+      "metaworld_selfattention_masked|metaworld_selfattention_masked/metaworld_selfatt_masked_epoch_3|"
+    )
+    ;;
+  button_press)
+    declare -a MODELS=(
+      "metaworld_coproj_button_press|metaworld_coproj_button_press/metaworld_coproj_button_press_epoch_10|"
+      "metaworld_gated_button_press|metaworld_gated_button_press/metaworld_gated_button_press_epoch_10|"
+      "metaworld_gated_masked_button_press|metaworld_gated_masked_button_press/metaworld_gated_masked_button_press_epoch_10|"
+      "metaworld_pixels_button_press_2|metaworld_pixels_button_press_2/metaworld_pixels_button_press_2_epoch_10|"
+      "metaworld_selfattention_masked_button_press|metaworld_selfattention_masked_button_press/metaworld_selfattention_masked_button_press_epoch_10|"
+    )
+    ;;
+  *)
+    echo "Unknown MODEL_SET='$MODEL_SET'. Available values: default, button_press." >&2
+    exit 1
+    ;;
+esac
 
 if [[ -n "${METAWORLD_TASKS:-}" ]]; then
   IFS=',' read -r -a TASKS <<< "$METAWORLD_TASKS"
@@ -249,6 +269,7 @@ echo "Planning suite report directory: $REPORT_DIR"
 echo "Tasks: ${TASKS[*]}"
 echo "Raw run records: $RAW_JSONL"
 echo "Parallel jobs: $PARALLEL_JOBS"
+echo "Cache dataset in RAM: $CACHE_DATASET_IN_RAM"
 
 run_one() {
   local task="$1"
@@ -259,7 +280,7 @@ run_one() {
   local seed="$6"
 
   local -a cmd=(
-    "$PYTHON_BIN" eval.py
+    "$PYTHON_BIN" -u eval.py
     --config-name=metaworld
     "policy=$policy_ref"
     "eval.dataset_name=$DATASET_NAME"
@@ -273,6 +294,11 @@ run_one() {
     "plan_config.action_block=$ACTION_BLOCK"
     "output.filename=planning_suite_eval_${TIMESTAMP}.txt"
   )
+  case "${CACHE_DATASET_IN_RAM,,}" in
+    1|true|yes|all)
+      cmd+=("dataset.cache_all_loaded=true")
+      ;;
+  esac
   if [[ -n "$extra_override" ]]; then
     cmd+=("$extra_override")
   fi
