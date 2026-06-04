@@ -8,6 +8,7 @@ outputs/
 *.txt
 *.json
 *.mp4
+*.tex
 
 le-thesis/
 SensorMetaWorld/
