@@ -37,7 +37,7 @@ class ProbeExperimentSpec:
     task_type: str
     required_keys: tuple[str, ...]
     passthrough_keys: tuple[str, ...]
-    output_dim: int
+    output_dim: int | None
     description: str
 
 
@@ -128,10 +128,13 @@ def get_experiment_specs():
         "object_distance": ProbeExperimentSpec(
             name="object_distance",
             task_type="regression",
-            required_keys=("ee_position", "object_1_xyz", "object_2_xyz"),
+            required_keys=("ee_position", "object_1_xyz"),
             passthrough_keys=("ee_position", "object_1_xyz", "object_2_xyz"),
-            output_dim=2,
-            description="Predict distances from the end effector to object_1 and object_2.",
+            output_dim=None,
+            description=(
+                "Predict distances from the end effector to the finite object "
+                "position columns available in the dataset."
+            ),
         ),
     }
 
@@ -209,11 +212,18 @@ def extract_contact_no_contact(batch, probe_step, args):
 
 def extract_object_distance(batch, probe_step, args):
     ee_position = batch["ee_position"][:, probe_step].float()[..., :3]
-    object_1 = batch["object_1_xyz"][:, probe_step].float()[..., :3]
-    object_2 = batch["object_2_xyz"][:, probe_step].float()[..., :3]
-    dist_1 = torch.linalg.norm(object_1 - ee_position, dim=-1, keepdim=True)
-    dist_2 = torch.linalg.norm(object_2 - ee_position, dim=-1, keepdim=True)
-    return torch.cat([dist_1, dist_2], dim=-1)
+    object_keys = getattr(args, "active_object_distance_keys", None)
+    if object_keys is None:
+        object_keys = ("object_1_xyz", "object_2_xyz")
+
+    distances = []
+    for key in object_keys:
+        obj = batch[key][:, probe_step].float()[..., :3]
+        distances.append(torch.linalg.norm(obj - ee_position, dim=-1, keepdim=True))
+
+    if not distances:
+        raise ValueError("No finite object position columns available for object_distance.")
+    return torch.cat(distances, dim=-1)
 
 
 TARGET_EXTRACTORS = {
@@ -226,6 +236,17 @@ TARGET_EXTRACTORS = {
 def make_probe_loader(features, targets, batch_size, shuffle):
     dataset = TensorDataset(features.float(), targets.float())
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, drop_last=False)
+
+
+def get_active_object_distance_keys(dataset):
+    active = []
+    for key in ("object_1_xyz", "object_2_xyz"):
+        if key not in dataset.column_names:
+            continue
+        values = dataset.get_col_data(key)
+        if np.isfinite(values).any():
+            active.append(key)
+    return tuple(active)
 
 
 def extract_split_data(
@@ -276,9 +297,15 @@ def extract_split_data(
     outputs = {}
     for name in experiment_names:
         targets = torch.cat(target_chunks[name], dim=0)
-        valid_mask = ~torch.isnan(targets).any(dim=1)
+        valid_mask = torch.isfinite(features).all(dim=1) & torch.isfinite(targets).all(dim=1)
         if valid_mask.sum().item() == 0:
-            raise ValueError(f"No valid targets found for experiment '{name}'.")
+            bad_features = (~torch.isfinite(features).all(dim=1)).sum().item()
+            bad_targets = (~torch.isfinite(targets).all(dim=1)).sum().item()
+            raise ValueError(
+                f"No valid rows found for experiment '{name}'. "
+                f"Rows with non-finite features: {bad_features}; "
+                f"rows with non-finite targets: {bad_targets}."
+            )
         outputs[name] = {
             "x": features[valid_mask],
             "y": targets[valid_mask],
@@ -328,6 +355,12 @@ def main():
         for key in spec.passthrough_keys:
             if key not in passthrough_keys:
                 passthrough_keys.append(key)
+    if (
+        "object_distance" in args.experiments
+        and "object_2_xyz" in available_columns
+        and "object_2_xyz" not in required_keys
+    ):
+        required_keys.append("object_2_xyz")
 
     dataset = build_dataset(
         cfg,
@@ -335,6 +368,18 @@ def main():
         extra_keys_to_load=required_keys,
         passthrough_keys=passthrough_keys,
     )
+    if "object_distance" in args.experiments:
+        args.active_object_distance_keys = get_active_object_distance_keys(dataset)
+        if not args.active_object_distance_keys:
+            raise ValueError(
+                "No finite object position columns available for object_distance. "
+                "Expected finite values in object_1_xyz and/or object_2_xyz."
+            )
+        print(
+            "object_distance target uses: "
+            f"{', '.join(args.active_object_distance_keys)}"
+        )
+
     split_indices = build_split_indices(
         dataset_len=len(dataset),
         max_samples=args.max_samples,
@@ -392,7 +437,11 @@ def main():
         probe = build_probe(
             args.probe_type,
             input_dim=train_data["x"].shape[-1],
-            output_dim=spec.output_dim,
+            output_dim=(
+                int(train_data["y"].shape[-1])
+                if spec.output_dim is None
+                else int(spec.output_dim)
+            ),
             hidden_dims=tuple(args.hidden_dims),
             dropout=args.dropout,
             k=args.knn_k,
@@ -476,6 +525,7 @@ def main():
             "num_train": int(train_data["x"].shape[0]),
             "num_val": int(val_data["x"].shape[0]),
             "num_test": int(test_data["x"].shape[0]),
+            "target_dim": int(train_data["y"].shape[-1]),
             "best_val_loss": best_val_loss,
             "metrics": {
                 "train": train_metrics,

@@ -179,8 +179,9 @@ def extract_representation(
     probe_step: int = -1,
 ):
     batch = copy_batch(batch)
-    if "action" in batch:
-        batch["action"] = torch.nan_to_num(batch["action"], 0.0)
+    for key, value in list(batch.items()):
+        if torch.is_tensor(value) and torch.is_floating_point(value):
+            batch[key] = torch.nan_to_num(value, 0.0)
 
     encoder = getattr(model, "encoder", None)
     previous_keep = None

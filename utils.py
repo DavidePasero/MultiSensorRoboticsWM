@@ -110,9 +110,9 @@ def get_column_normalizer(dataset, source: str, target: str):
     """Get normalizer for a specific column in the dataset."""
     col_data = dataset.get_col_data(source)
     data = torch.from_numpy(np.array(col_data))
-    data = data[~torch.isnan(data).any(dim=1)]
+    data = data[torch.isfinite(data).all(dim=1)]
     mean = data.mean(0, keepdim=True).clone()
-    std = data.std(0, keepdim=True).clone()
+    std = data.std(0, keepdim=True).clone().clamp_min(1e-6)
 
     def norm_fn(x):
         return ((x - mean) / std).float()
