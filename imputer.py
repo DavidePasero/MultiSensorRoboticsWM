@@ -347,6 +347,8 @@ class SelfMaskImputer(BaseImputer):
         dropout=0.0,
         random_mask_prob=0.0,
         feature_mask_ratio=0.25,
+        missing_weight=1.0,
+        partial_weight=1.0,
     ):
         super().__init__(
             input_dims=input_dims,
@@ -365,6 +367,16 @@ class SelfMaskImputer(BaseImputer):
         self.feature_mask_ratio = _validate_ratio(
             "feature_mask_ratio", feature_mask_ratio
         )
+        self.missing_weight = float(missing_weight)
+        self.partial_weight = float(partial_weight)
+        if self.missing_weight < 0.0:
+            raise ValueError(
+                f"missing_weight must be non-negative. Got {self.missing_weight}."
+            )
+        if self.partial_weight < 0.0:
+            raise ValueError(
+                f"partial_weight must be non-negative. Got {self.partial_weight}."
+            )
 
         self.modality_embeddings = nn.Parameter(
             torch.empty(len(self.modalities), self.model_dim)
@@ -537,13 +549,18 @@ class SelfMaskImputer(BaseImputer):
                 target_stack,
                 feature_mask,
             )
-            recon_loss = missing_recon_loss + partial_recon_loss
+            recon_loss = (
+                self.missing_weight * missing_recon_loss
+                + self.partial_weight * partial_recon_loss
+            )
 
         return {
             "modality_tokens": predicted_tokens,
             "imputer_recon_loss": recon_loss,
             "imputer_missing_recon_loss": missing_recon_loss,
             "imputer_partial_recon_loss": partial_recon_loss,
+            "imputer_missing_weighted_loss": self.missing_weight * missing_recon_loss,
+            "imputer_partial_weighted_loss": self.partial_weight * partial_recon_loss,
             "masked_modality_fraction": full_mask.float().mean().detach(),
             "masked_feature_fraction": feature_mask.float().mean().detach(),
         }
@@ -562,6 +579,8 @@ def build_imputer(obs_cfg, input_dims, default_model_dim):
                 "num_layers": 2,
                 "mlp_ratio": 4.0,
                 "dropout": 0.0,
+                "missing_weight": 1.0,
+                "partial_weight": 1.0,
             },
             "latent_reconstruction": {
                 "num_heads": 4,
@@ -593,6 +612,8 @@ def build_imputer(obs_cfg, input_dims, default_model_dim):
             dropout=selfmask_cfg.get("dropout", 0.0),
             random_mask_prob=random_mask_prob,
             feature_mask_ratio=imputer_cfg.get("feature_mask_ratio", 0.25),
+            missing_weight=selfmask_cfg.get("missing_weight", 1.0),
+            partial_weight=selfmask_cfg.get("partial_weight", 1.0),
         )
 
     if imputer_type in {"latent_reconstruction", "latent_recon"}:

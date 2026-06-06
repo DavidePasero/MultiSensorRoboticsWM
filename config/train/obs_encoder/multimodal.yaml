@@ -59,6 +59,8 @@ imputer:
     num_layers: 2
     mlp_ratio: 4.0
     dropout: 0.0
+    missing_weight: 2.0
+    partial_weight: 0.25
   latent_reconstruction:
     num_heads: 4
     num_layers: 2
