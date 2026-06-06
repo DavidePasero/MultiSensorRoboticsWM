@@ -56,6 +56,12 @@ eval:
   goal_success_key: success
   img_size: 224
   render_size: 128
+  pixels_gaussian_blur:
+    enabled: false
+    probability: 1.0
+    kernel_size: 5
+    sigma_min: 0.0
+    sigma_max: 1.5
   drop_modality: null
   drop_modalities: []
   dataset_name: metaworld_eval

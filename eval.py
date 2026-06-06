@@ -16,6 +16,7 @@ import torch
 import torch.nn.functional as F
 from omegaconf import DictConfig, OmegaConf
 from sklearn import preprocessing
+from multimodal import _apply_gaussian_blur
 from torchvision.transforms import v2 as transforms
 import stable_worldmodel as swm
 
@@ -86,6 +87,33 @@ def _make_json_safe(value):
     if torch.is_tensor(value):
         return value.detach().cpu().tolist()
     return value
+
+
+class EvalGaussianBlur:
+    """Apply stochastic Gaussian blur once during policy input preparation."""
+
+    def __init__(self, blur_cfg):
+        self.blur_cfg = dict(blur_cfg)
+        self.blur_cfg["enabled"] = True
+        self.blur_cfg["training_only"] = False
+
+    def __call__(self, image):
+        blurred = _apply_gaussian_blur(
+            torch.as_tensor(image).unsqueeze(0),
+            self.blur_cfg,
+            training=True,
+        )
+        return blurred.squeeze(0)
+
+
+def get_eval_pixels_gaussian_blur(eval_cfg):
+    blur_cfg = eval_cfg.get("pixels_gaussian_blur", None)
+    if blur_cfg is None or not blur_cfg.get("enabled", False):
+        return None
+
+    blur_cfg = OmegaConf.to_container(blur_cfg, resolve=True)
+    blur_cfg["enabled"] = True
+    return blur_cfg
 
 
 class ModalityDropoutWorldModelPolicy(swm.policy.WorldModelPolicy):
@@ -210,15 +238,26 @@ class ModalityDropoutWorldModelPolicy(swm.policy.WorldModelPolicy):
 
 
 def img_transform(cfg):
-    transform = transforms.Compose(
+    blur_cfg = get_eval_pixels_gaussian_blur(cfg.eval)
+    if blur_cfg is None:
+        return transforms.Compose(
+            [
+                transforms.ToImage(),
+                transforms.ToDtype(torch.float32, scale=True),
+                transforms.Normalize(**spt.data.dataset_stats.ImageNet),
+                transforms.Resize(size=cfg.eval.img_size),
+            ]
+        )
+
+    return transforms.Compose(
         [
             transforms.ToImage(),
             transforms.ToDtype(torch.float32, scale=True),
-            transforms.Normalize(**spt.data.dataset_stats.ImageNet),
             transforms.Resize(size=cfg.eval.img_size),
+            EvalGaussianBlur(blur_cfg),
+            transforms.Normalize(**spt.data.dataset_stats.ImageNet),
         ]
     )
-    return transform
 
 
 def resolve_dataset_env_idx(dataset, cfg):

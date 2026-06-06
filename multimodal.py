@@ -71,7 +71,91 @@ def _flatten_image_sequence(x: torch.Tensor):
     return flat, b, t, input_is_float
 
 
-def _preprocess_image_sequence(x: torch.Tensor, *, img_size=None, mean=None, std=None):
+def _gaussian_kernels2d(kernel_size: int, sigmas: torch.Tensor):
+    device = sigmas.device
+    dtype = sigmas.dtype
+    coords = torch.arange(kernel_size, device=device, dtype=dtype)
+    coords = coords - (kernel_size - 1) / 2.0
+    active = sigmas > 0.0
+    safe_sigmas = sigmas.clamp_min(1e-6)
+    kernel_1d = torch.exp(
+        -(coords.view(1, -1).pow(2)) / (2.0 * safe_sigmas.view(-1, 1).pow(2))
+    )
+    kernel_1d = kernel_1d / kernel_1d.sum(dim=1, keepdim=True).clamp_min(1e-12)
+    kernels = kernel_1d[:, :, None] * kernel_1d[:, None, :]
+    if not active.all():
+        identity = torch.zeros_like(kernels)
+        identity[:, kernel_size // 2, kernel_size // 2] = 1.0
+        kernels = torch.where(active.view(-1, 1, 1), kernels, identity)
+    return kernels
+
+
+def _apply_gaussian_blur(x: torch.Tensor, blur_cfg=None, *, training=False):
+    if blur_cfg is None or not blur_cfg.get("enabled", False):
+        return x
+    if blur_cfg.get("training_only", True) and not training:
+        return x
+
+    kernel_size = int(blur_cfg.get("kernel_size", 5))
+    if kernel_size <= 1:
+        return x
+    if kernel_size % 2 == 0:
+        raise ValueError(f"Gaussian blur kernel_size must be odd, got {kernel_size}.")
+
+    probability = float(blur_cfg.get("probability", 1.0))
+    if probability <= 0.0:
+        return x
+    if probability > 1.0:
+        raise ValueError(f"Gaussian blur probability must be <= 1. Got {probability}.")
+
+    sigma_min = blur_cfg.get("sigma_min")
+    sigma_max = blur_cfg.get("sigma_max")
+    if sigma_min is not None or sigma_max is not None:
+        sigma_min = float(0.0 if sigma_min is None else sigma_min)
+        sigma_max = float(sigma_min if sigma_max is None else sigma_max)
+        if sigma_min < 0.0 or sigma_max < sigma_min:
+            raise ValueError(
+                "Gaussian blur sigma range must satisfy 0 <= sigma_min <= sigma_max. "
+                f"Got sigma_min={sigma_min}, sigma_max={sigma_max}."
+            )
+        sigmas = torch.empty(x.size(0), device=x.device, dtype=x.dtype).uniform_(
+            sigma_min, sigma_max
+        )
+    else:
+        sigma = float(blur_cfg.get("sigma", 1.0))
+        if sigma < 0.0:
+            raise ValueError(f"Gaussian blur sigma must be non-negative, got {sigma}.")
+        sigmas = torch.full((x.size(0),), sigma, device=x.device, dtype=x.dtype)
+
+    if probability < 1.0:
+        keep_sharp = torch.rand(x.size(0), device=x.device) > probability
+        sigmas = torch.where(keep_sharp, torch.zeros_like(sigmas), sigmas)
+    if torch.count_nonzero(sigmas).item() == 0:
+        return x
+
+    channels = x.size(1)
+    kernels = _gaussian_kernels2d(
+        kernel_size,
+        sigmas,
+    )
+    kernels = kernels[:, None].expand(-1, channels, -1, -1)
+    kernels = kernels.reshape(x.size(0) * channels, 1, kernel_size, kernel_size)
+    padding = kernel_size // 2
+    x = F.pad(x, (padding, padding, padding, padding), mode="reflect")
+    x = x.reshape(1, x.size(0) * channels, x.size(2), x.size(3))
+    x = F.conv2d(x, kernels, groups=kernels.size(0))
+    return x.reshape(-1, channels, x.size(-2), x.size(-1))
+
+
+def _preprocess_image_sequence(
+    x: torch.Tensor,
+    *,
+    img_size=None,
+    mean=None,
+    std=None,
+    gaussian_blur=None,
+    training=False,
+):
     x, b, t, input_is_float = _flatten_image_sequence(x)
     x = x.float()
 
@@ -86,6 +170,8 @@ def _preprocess_image_sequence(x: torch.Tensor, *, img_size=None, mean=None, std
             align_corners=False,
             antialias=True,
         )
+
+    x = _apply_gaussian_blur(x, gaussian_blur, training=training)
 
     if mean is not None and std is not None:
         mean = torch.tensor(mean, dtype=x.dtype, device=x.device).view(1, -1, 1, 1)
@@ -146,8 +232,10 @@ class ViTImageEncoder(BaseModalityEncoder):
         image_size,
         pretrained=False,
         projector_hidden_dim=2048,
+        gaussian_blur=None,
     ):
         super().__init__(source=source, output_dim=output_dim)
+        self.gaussian_blur = gaussian_blur
         self.backbone = spt.backbone.utils.vit_hf(
             encoder_scale,
             patch_size=patch_size,
@@ -175,6 +263,8 @@ class ViTImageEncoder(BaseModalityEncoder):
             img_size=image_size,
             mean=mean,
             std=std,
+            gaussian_blur=self.gaussian_blur,
+            training=self.training,
         )
         output = self.backbone(x, interpolate_pos_encoding=True)
         cls_token = output.last_hidden_state[:, 0]
@@ -192,9 +282,11 @@ class CNNImageEncoder(BaseModalityEncoder):
         img_size=None,
         hidden_dims=(32, 64, 128),
         head_hidden_dim=None,
+        gaussian_blur=None,
     ):
         super().__init__(source=source, output_dim=output_dim)
         self.img_size = img_size
+        self.gaussian_blur = gaussian_blur
         hidden_dims = list(hidden_dims)
         if not hidden_dims:
             raise ValueError("CNNImageEncoder requires at least one hidden dimension.")
@@ -242,6 +334,8 @@ class CNNImageEncoder(BaseModalityEncoder):
             img_size=img_size,
             mean=mean,
             std=std,
+            gaussian_blur=self.gaussian_blur,
+            training=self.training,
         )
         x = self.conv(x)
         x = self.head(x)
@@ -370,6 +464,7 @@ def build_modality_encoder(cfg, name, mod_cfg):
             image_size=img_size,
             pretrained=mod_cfg.get("pretrained", False),
             projector_hidden_dim=mod_cfg.get("projector_hidden_dim", 2048),
+            gaussian_blur=mod_cfg.get("gaussian_blur"),
         )
 
     if encoder_type == "cnn":
@@ -393,6 +488,7 @@ def build_modality_encoder(cfg, name, mod_cfg):
             img_size=mod_cfg.get("img_size"),
             hidden_dims=mod_cfg.get("hidden_dims", (32, 64, 128)),
             head_hidden_dim=mod_cfg.get("head_hidden_dim"),
+            gaussian_blur=mod_cfg.get("gaussian_blur"),
         )
 
     if encoder_type == "mlp":

@@ -13,6 +13,13 @@ modalities:
     output_dim: 128
     pretrained: False
     projector_hidden_dim: 2048
+    gaussian_blur:
+      enabled: False
+      training_only: True
+      probability: 0.75
+      kernel_size: 5
+      sigma_min: 0.0
+      sigma_max: 1.5
 
   depth:
     enabled: True
