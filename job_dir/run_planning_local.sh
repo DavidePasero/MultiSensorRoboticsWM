@@ -2,12 +2,12 @@
 
 source .venv/bin/activate
 
-MODEL_RUN="${MODEL_RUN:-metaworld_gated_masked_high_sigreg_drawer_open}"
-DATASET_NAME="${DATASET_NAME:-metaworld_eval_drawer_open}"
-OUTPUT_FILENAME="${OUTPUT_FILENAME:-documentation/planning_results_drawer_open/planning_results_${MODEL_RUN}.txt}"
+MODEL_RUN="${MODEL_RUN:-bin_picking/metaworld_selfattention_latent_reconstruction_bin_picking}"
+DATASET_NAME="${DATASET_NAME:-metaworld_eval_bin_picking}"
+OUTPUT_FILENAME="${OUTPUT_FILENAME:-documentation/planning_results_bin_picking/planning_results_${MODEL_RUN}.txt}"
 
 TASKS=(
-  "drawer-open-v3" \
+  "bin-picking-v3" \
 )
 
 SEEDS=(42 43 44)

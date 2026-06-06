@@ -55,23 +55,6 @@ def _sample_full_modality_mask(training, random_mask_prob, available_mask):
     return random_mask.expand_as(available_mask)
 
 
-def _sample_feature_mask(training, feature_mask_ratio, observed_mask, model_dim):
-    """
-    Sample feature-dimension masks for the modalities kept after whole-modality masking.
-
-    observed_mask: (B, T, M) boolean mask for available modalities that are not fully masked.
-    returns: (B, T, M, D) boolean mask
-    """
-    shape = (*observed_mask.shape, model_dim)
-    if (not training) or feature_mask_ratio <= 0.0:
-        return torch.zeros(shape, device=observed_mask.device, dtype=torch.bool)
-
-    feature_mask = (
-        torch.rand(shape, device=observed_mask.device) < feature_mask_ratio
-    )
-    return feature_mask & observed_mask.unsqueeze(-1)
-
-
 def _stack_tokens(token_dict, modalities):
     return torch.stack([token_dict[name] for name in modalities], dim=2)
 
@@ -364,7 +347,6 @@ class SelfMaskImputer(BaseImputer):
         dropout=0.0,
         random_mask_prob=0.0,
         feature_mask_ratio=0.25,
-        ema_decay=0.996,
     ):
         super().__init__(
             input_dims=input_dims,
@@ -383,9 +365,6 @@ class SelfMaskImputer(BaseImputer):
         self.feature_mask_ratio = _validate_ratio(
             "feature_mask_ratio", feature_mask_ratio
         )
-        self.ema_decay = float(ema_decay)
-        if not 0.0 <= self.ema_decay < 1.0:
-            raise ValueError(f"ema_decay must be in [0, 1). Got {self.ema_decay}.")
 
         self.modality_embeddings = nn.Parameter(
             torch.empty(len(self.modalities), self.model_dim)
@@ -408,16 +387,20 @@ class SelfMaskImputer(BaseImputer):
         )
         self.predictor = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         self.output_norm = nn.LayerNorm(self.model_dim)
-
-        self.target_projections = nn.ModuleDict(
-            {
-                name: nn.Linear(input_dim, self.model_dim)
-                for name, input_dim in input_dims.items()
-            }
+        mask_encoder_layer = nn.TransformerEncoderLayer(
+            d_model=self.model_dim,
+            nhead=num_heads,
+            dim_feedforward=ff_dim,
+            dropout=dropout,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
         )
-        self._copy_online_to_target()
-        for param in self.target_projections.parameters():
-            param.requires_grad_(False)
+        self.mask_predictor = nn.TransformerEncoder(
+            mask_encoder_layer, num_layers=num_layers
+        )
+        self.mask_output_norm = nn.LayerNorm(self.model_dim)
+        self.mask_score_head = nn.Linear(self.model_dim, self.model_dim)
 
         self.reset_selfmask_parameters()
 
@@ -426,43 +409,20 @@ class SelfMaskImputer(BaseImputer):
         for token in self.feature_mask_tokens.values():
             nn.init.normal_(token, std=0.02)
 
-    @torch.no_grad()
-    def _copy_online_to_target(self):
-        for name in self.modalities:
-            self.target_projections[name].load_state_dict(
-                self.projections[name].state_dict()
-            )
-
-    @torch.no_grad()
-    def _update_target_projections(self):
-        for name in self.modalities:
-            target = self.target_projections[name]
-            online = self.projections[name]
-            target.weight.mul_(self.ema_decay).add_(
-                online.weight.detach(), alpha=1.0 - self.ema_decay
-            )
-            if target.bias is not None and online.bias is not None:
-                target.bias.mul_(self.ema_decay).add_(
-                    online.bias.detach(), alpha=1.0 - self.ema_decay
-                )
-
     def _apply_feature_mask(
         self,
         token_dict,
-        feature_mask,
-        *,
-        detach_mask_tokens=False,
+        feature_mask_values,
     ):
         masked = OrderedDict()
         for idx, name in enumerate(self.modalities):
             token = token_dict[name]
             mask_token = self.feature_mask_tokens[name]
-            if detach_mask_tokens:
-                mask_token = mask_token.detach()
             mask_token = mask_token.to(device=token.device, dtype=token.dtype).expand_as(
                 token
             )
-            masked[name] = torch.where(feature_mask[:, :, idx], mask_token, token)
+            mask_value = feature_mask_values[:, :, idx].to(dtype=token.dtype)
+            masked[name] = token * (1.0 - mask_value) + mask_token * mask_value
         return masked
 
     def _add_modality_embeddings(self, token_dict):
@@ -483,68 +443,78 @@ class SelfMaskImputer(BaseImputer):
         tokens = tokens.reshape(batch_size, num_steps, num_modalities, token_dim)
         return _unstack_tokens(tokens, self.modalities)
 
+    def _predict_feature_mask(self, token_dict, full_mask, observed_kept):
+        shape = (*observed_kept.shape, self.model_dim)
+        if (not self.training) or self.feature_mask_ratio <= 0.0:
+            zero = next(iter(token_dict.values())).new_zeros(shape)
+            return torch.zeros(shape, device=zero.device, dtype=torch.bool), zero
+
+        topk = max(1, int(round(self.model_dim * self.feature_mask_ratio)))
+        topk = min(topk, self.model_dim)
+
+        mask_inputs = self._apply_missing_tokens(token_dict, full_mask)
+        mask_inputs = self._add_modality_embeddings(mask_inputs)
+        tokens = _stack_tokens(mask_inputs, self.modalities)
+        batch_size, num_steps, num_modalities, token_dim = tokens.shape
+        tokens = tokens.reshape(batch_size * num_steps, num_modalities, token_dim)
+        scores = self.mask_predictor(tokens)
+        scores = self.mask_output_norm(scores)
+        scores = self.mask_score_head(scores)
+        scores = scores.reshape(batch_size, num_steps, num_modalities, token_dim)
+
+        hard_mask = torch.zeros_like(scores, dtype=torch.bool)
+        topk_idx = scores.topk(k=topk, dim=-1).indices
+        hard_mask.scatter_(-1, topk_idx, True)
+        hard_mask = hard_mask & observed_kept.unsqueeze(-1)
+
+        soft_mask = torch.sigmoid(scores) * observed_kept.unsqueeze(-1).to(
+            scores.dtype
+        )
+        straight_through_mask = (
+            hard_mask.to(scores.dtype) + soft_mask - soft_mask.detach()
+        )
+        return hard_mask, straight_through_mask
+
     def _build_masked_inputs(
         self,
-        modality_embs,
+        token_dict,
         full_mask,
-        feature_mask,
-        *,
-        detach_encoder_inputs,
-        detach_projection,
-        detach_missing_tokens,
+        feature_mask_values,
     ):
-        token_dict, _ = self._project_tokens(
-            modality_embs,
-            detach_encoder_inputs=detach_encoder_inputs,
-            detach_projection=detach_projection,
-        )
         token_dict = self._apply_feature_mask(
             token_dict,
-            feature_mask,
-            detach_mask_tokens=False,
+            feature_mask_values,
         )
         token_dict = self._apply_missing_tokens(
             token_dict,
             full_mask,
-            detach_mask_tokens=detach_missing_tokens,
         )
         return self._add_modality_embeddings(token_dict)
-
-    @torch.no_grad()
-    def _build_targets(self, modality_embs):
-        token_dict = OrderedDict()
-        for name in self.modalities:
-            if name not in modality_embs:
-                continue
-            value = modality_embs[name].detach()
-            token_dict[name] = self.target_projections[name](value)
-        return token_dict
 
     def _masked_mse(self, pred, target, mask):
         if not mask.any():
             return pred.new_zeros(())
         diff = (pred - target).pow(2)
-        diff = diff * mask.to(dtype=diff.dtype)
-        return diff.sum() / mask.sum().clamp_min(1).to(diff.dtype)
+        mask = mask.to(dtype=diff.dtype).expand_as(diff)
+        return (diff * mask).sum() / mask.sum().clamp_min(1)
 
     def forward(self, modality_embs):
-        _, available_mask = self._project_tokens(modality_embs)
+        token_dict, available_mask = self._project_tokens(modality_embs)
         random_mask = _sample_full_modality_mask(
             self.training, self.random_mask_prob, available_mask
         )
         full_mask = (~available_mask) | random_mask
         observed_kept = available_mask & (~random_mask)
-        feature_mask = _sample_feature_mask(
-            self.training, self.feature_mask_ratio, observed_kept, self.model_dim
+        feature_mask, feature_mask_values = self._predict_feature_mask(
+            token_dict,
+            full_mask,
+            observed_kept,
         )
 
         jepa_inputs = self._build_masked_inputs(
-            modality_embs,
+            token_dict,
             full_mask,
-            feature_mask,
-            detach_encoder_inputs=False,
-            detach_projection=False,
-            detach_missing_tokens=False,
+            feature_mask_values,
         )
         predicted_tokens = self._predict_tokens(jepa_inputs)
 
@@ -555,44 +525,19 @@ class SelfMaskImputer(BaseImputer):
         recon_loss = zero
 
         if self.training:
-            self._update_target_projections()
-            recon_inputs = self._build_masked_inputs(
-                modality_embs,
-                full_mask,
-                feature_mask,
-                detach_encoder_inputs=True,
-                detach_projection=True,
-                detach_missing_tokens=True,
+            pred_stack = _stack_tokens(predicted_tokens, self.modalities)
+            target_stack = _stack_tokens(token_dict, self.modalities)
+            missing_recon_loss = self._masked_mse(
+                pred_stack,
+                target_stack,
+                (random_mask & available_mask).unsqueeze(-1),
             )
-            recon_predicted_tokens = self._predict_tokens(recon_inputs)
-            target_tokens = self._build_targets(modality_embs)
-
-            if target_tokens:
-                pred_stack = _stack_tokens(recon_predicted_tokens, self.modalities)
-
-                target_stack = torch.stack(
-                    [
-                        target_tokens.get(
-                            name,
-                            reference.new_zeros(
-                                reference.shape[0], reference.shape[1], self.model_dim
-                            ),
-                        )
-                        for name in self.modalities
-                    ],
-                    dim=2,
-                )
-                missing_recon_loss = self._masked_mse(
-                    pred_stack,
-                    target_stack,
-                    (random_mask & available_mask).unsqueeze(-1),
-                )
-                partial_recon_loss = self._masked_mse(
-                    pred_stack,
-                    target_stack,
-                    feature_mask,
-                )
-                recon_loss = missing_recon_loss + partial_recon_loss
+            partial_recon_loss = self._masked_mse(
+                pred_stack,
+                target_stack,
+                feature_mask,
+            )
+            recon_loss = missing_recon_loss + partial_recon_loss
 
         return {
             "modality_tokens": predicted_tokens,
@@ -612,7 +557,6 @@ def build_imputer(obs_cfg, input_dims, default_model_dim):
             "model_dim": default_model_dim,
             "random_mask_prob": 0.0,
             "feature_mask_ratio": 0.25,
-            "ema_decay": 0.996,
             "selfmask": {
                 "num_heads": 4,
                 "num_layers": 2,
@@ -649,7 +593,6 @@ def build_imputer(obs_cfg, input_dims, default_model_dim):
             dropout=selfmask_cfg.get("dropout", 0.0),
             random_mask_prob=random_mask_prob,
             feature_mask_ratio=imputer_cfg.get("feature_mask_ratio", 0.25),
-            ema_decay=imputer_cfg.get("ema_decay", 0.996),
         )
 
     if imputer_type in {"latent_reconstruction", "latent_recon"}:

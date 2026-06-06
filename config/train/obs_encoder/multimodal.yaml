@@ -54,7 +54,6 @@ imputer:
   model_dim: 128
   random_mask_prob: 0.0
   feature_mask_ratio: 0.25
-  ema_decay: 0.996
   selfmask:
     num_heads: 4
     num_layers: 2
