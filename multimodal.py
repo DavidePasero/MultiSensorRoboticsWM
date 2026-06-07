@@ -221,6 +221,16 @@ class BaseModalityEncoder(nn.Module):
         return info[self.source]
 
 
+def _get_gaussian_blur_config(module):
+    if hasattr(module, "gaussian_blur"):
+        return module.gaussian_blur
+
+    # Backward compatibility for checkpoints saved before gaussian_blur existed.
+    blur_cfg = getattr(module, "gaussian_blue", None)
+    module.gaussian_blur = blur_cfg
+    return blur_cfg
+
+
 class ViTImageEncoder(BaseModalityEncoder):
     def __init__(
         self,
@@ -263,7 +273,7 @@ class ViTImageEncoder(BaseModalityEncoder):
             img_size=image_size,
             mean=mean,
             std=std,
-            gaussian_blur=self.gaussian_blur,
+            gaussian_blur=_get_gaussian_blur_config(self),
             training=self.training,
         )
         output = self.backbone(x, interpolate_pos_encoding=True)
@@ -334,7 +344,7 @@ class CNNImageEncoder(BaseModalityEncoder):
             img_size=img_size,
             mean=mean,
             std=std,
-            gaussian_blur=self.gaussian_blur,
+            gaussian_blur=_get_gaussian_blur_config(self),
             training=self.training,
         )
         x = self.conv(x)
