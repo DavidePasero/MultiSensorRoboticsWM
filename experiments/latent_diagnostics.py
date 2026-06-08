@@ -70,6 +70,44 @@ def parse_args():
         default=0,
         help="DataLoader workers for sampled clips.",
     )
+    parser.add_argument(
+        "--keys-to-cache",
+        nargs="*",
+        default=None,
+        help=(
+            "Override data.dataset.keys_to_cache. Use no values to disable "
+            "RAM caching, e.g. --keys-to-cache."
+        ),
+    )
+    parser.add_argument(
+        "--cache-all-loaded",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Override data.dataset.cache_all_loaded when the dataset config has it.",
+    )
+    parser.add_argument(
+        "--mask-modalities",
+        nargs="+",
+        default=None,
+        help=(
+            "Modalities to drop for full-vs-masked rollout divergence, e.g. "
+            "--mask-modalities pixels depth."
+        ),
+    )
+    parser.add_argument(
+        "--keep-modalities",
+        nargs="+",
+        default=None,
+        help=(
+            "Keep only these modalities for full-vs-masked rollout divergence; "
+            "all other enabled observation modalities are dropped."
+        ),
+    )
+    parser.add_argument(
+        "--mask-each-modality",
+        action="store_true",
+        help="Also evaluate one full-vs-masked divergence condition per modality.",
+    )
     return parser.parse_args()
 
 
@@ -117,6 +155,70 @@ def enabled_model_sources(cfg) -> set[str]:
     return sources
 
 
+def enabled_observation_sources(cfg) -> list[str]:
+    if not OmegaConf.select(cfg, "obs_encoder.modalities"):
+        return ["pixels"]
+    sources = []
+    for name, mod_cfg in get_enabled_modality_configs(cfg.obs_encoder).items():
+        source = str(mod_cfg.get("source", name))
+        if source not in sources:
+            sources.append(source)
+    return sources
+
+
+def model_supports_missing_modalities(model) -> bool:
+    encoder = getattr(model, "encoder", None)
+    imputer = getattr(encoder, "imputer", None) if encoder is not None else None
+    if imputer is not None:
+        return bool(getattr(imputer, "supports_missing_modalities", False))
+    fusion = getattr(encoder, "fusion", None) if encoder is not None else None
+    return bool(getattr(fusion, "supports_missing_modalities", False))
+
+
+def build_mask_conditions(cfg, args) -> list[tuple[str, list[str]]]:
+    sources = enabled_observation_sources(cfg)
+    conditions = []
+
+    def add_condition(label: str, drop_modalities: list[str]):
+        unknown = [name for name in drop_modalities if name not in sources]
+        if unknown:
+            raise ValueError(
+                f"Unknown mask modalities {unknown}. Available modalities: {sources}."
+            )
+        drop_modalities = [name for name in sources if name in drop_modalities]
+        if not drop_modalities:
+            return
+        if len(drop_modalities) >= len(sources):
+            raise ValueError(
+                f"Mask condition '{label}' drops every modality. "
+                f"Available modalities: {sources}."
+            )
+        condition = (label, drop_modalities)
+        if condition not in conditions:
+            conditions.append(condition)
+
+    if args.mask_each_modality:
+        for source in sources:
+            if len(sources) > 1:
+                add_condition(f"drop_{source}", [source])
+
+    if args.mask_modalities is not None:
+        label = "drop_" + "_".join(args.mask_modalities)
+        add_condition(label, list(args.mask_modalities))
+
+    if args.keep_modalities is not None:
+        unknown = [name for name in args.keep_modalities if name not in sources]
+        if unknown:
+            raise ValueError(
+                f"Unknown keep modalities {unknown}. Available modalities: {sources}."
+            )
+        drop = [source for source in sources if source not in args.keep_modalities]
+        label = "keep_" + "_".join(args.keep_modalities)
+        add_condition(label, drop)
+
+    return conditions
+
+
 def choose_image_key(requested_key: str, available_columns: list[str]) -> str | None:
     if requested_key != "auto":
         return requested_key if requested_key in available_columns else None
@@ -131,6 +233,10 @@ def configure_dataset(cfg, args, history_size: int):
     with open_dict(cfg):
         cfg.data.dataset.name = args.dataset
         cfg.data.dataset.num_steps = clip_len
+        if args.keys_to_cache is not None:
+            cfg.data.dataset.keys_to_cache = list(args.keys_to_cache)
+        if args.cache_all_loaded is not None:
+            cfg.data.dataset.cache_all_loaded = bool(args.cache_all_loaded)
 
 
 def build_diagnostic_dataset(cfg, args, cache_dir, available_columns):
@@ -191,16 +297,23 @@ def encode_batch(model, batch):
     return emb, action
 
 
+def mask_batch(batch, drop_modalities: list[str]):
+    masked = dict(batch)
+    for modality in drop_modalities:
+        masked.pop(modality, None)
+    return masked
+
+
 @torch.no_grad()
-def open_loop_errors(model, emb, action, history_size: int, max_horizon: int):
+def open_loop_predictions(model, emb, action, history_size: int, max_horizon: int):
     max_valid_horizon = min(
         int(max_horizon),
         emb.size(1) - history_size,
         max(0, action.size(1) - history_size + 1),
     )
-    errors = {horizon: [] for horizon in range(1, max_valid_horizon + 1)}
+    predictions = {}
     if max_valid_horizon <= 0:
-        return errors
+        return predictions
 
     rollout_emb = emb[:, :history_size].clone()
     rollout_action = action[:, :history_size].clone()
@@ -211,16 +324,64 @@ def open_loop_errors(model, emb, action, history_size: int, max_horizon: int):
             rollout_emb[:, -history_size:],
             act_emb,
         )[:, -1]
-        target = emb[:, history_size + horizon - 1]
-        error = torch.linalg.norm(pred_next - target, dim=-1)
-        errors[horizon].extend(error.detach().cpu().tolist())
+        predictions[horizon] = pred_next.detach()
 
         if horizon < max_valid_horizon:
             rollout_emb = torch.cat([rollout_emb, pred_next.unsqueeze(1)], dim=1)
             next_action = action[:, history_size + horizon - 1 : history_size + horizon]
             rollout_action = torch.cat([rollout_action, next_action], dim=1)
 
+    return predictions
+
+
+@torch.no_grad()
+def open_loop_errors(model, emb, action, history_size: int, max_horizon: int):
+    predictions = open_loop_predictions(
+        model,
+        emb,
+        action,
+        history_size,
+        max_horizon,
+    )
+    errors = {horizon: [] for horizon in predictions}
+    for horizon, pred_next in predictions.items():
+        target = emb[:, history_size + horizon - 1]
+        error = torch.linalg.norm(pred_next - target, dim=-1)
+        errors[horizon].extend(error.detach().cpu().tolist())
+
     return errors
+
+
+def latent_cosine(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    numerator = (a * b).sum(dim=-1)
+    denominator = torch.linalg.norm(a, dim=-1) * torch.linalg.norm(b, dim=-1)
+    return numerator / denominator.clamp_min(EPS)
+
+
+def update_encoded_divergence(storage, condition, full_emb, masked_emb):
+    steps = min(full_emb.size(1), masked_emb.size(1))
+    if steps <= 0:
+        return
+    full_emb = full_emb[:, :steps]
+    masked_emb = masked_emb[:, :steps]
+    l2 = torch.linalg.norm(full_emb - masked_emb, dim=-1)
+    cosine = latent_cosine(full_emb, masked_emb)
+    storage[condition]["l2"].extend(l2.detach().cpu().reshape(-1).tolist())
+    storage[condition]["cosine"].extend(cosine.detach().cpu().reshape(-1).tolist())
+
+
+def update_rollout_divergence(storage, condition, full_predictions, masked_predictions):
+    for horizon in sorted(set(full_predictions) & set(masked_predictions)):
+        full_pred = full_predictions[horizon]
+        masked_pred = masked_predictions[horizon]
+        l2 = torch.linalg.norm(full_pred - masked_pred, dim=-1)
+        cosine = latent_cosine(full_pred, masked_pred)
+        storage[condition]["l2"].setdefault(horizon, []).extend(
+            l2.detach().cpu().tolist()
+        )
+        storage[condition]["cosine"].setdefault(horizon, []).extend(
+            cosine.detach().cpu().tolist()
+        )
 
 
 def update_path_metrics(metrics, emb_cpu):
@@ -324,6 +485,85 @@ def prediction_error_rows(errors_by_horizon):
 def write_prediction_csv(path: Path, rows):
     with path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=["horizon", "mean_error", "std_error"])
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def encoded_divergence_rows(encoded_divergence):
+    rows = []
+    for condition in sorted(encoded_divergence):
+        l2_stats = summarize(encoded_divergence[condition]["l2"])
+        cosine_stats = summarize(encoded_divergence[condition]["cosine"])
+        rows.append(
+            {
+                "condition": condition,
+                "mean_l2": l2_stats["mean"],
+                "std_l2": l2_stats["std"],
+                "mean_cosine": cosine_stats["mean"],
+                "std_cosine": cosine_stats["std"],
+                "count": l2_stats["count"],
+            }
+        )
+    return rows
+
+
+def rollout_divergence_rows(rollout_divergence):
+    rows = []
+    for condition in sorted(rollout_divergence):
+        horizons = sorted(
+            set(rollout_divergence[condition]["l2"])
+            | set(rollout_divergence[condition]["cosine"])
+        )
+        for horizon in horizons:
+            l2_stats = summarize(rollout_divergence[condition]["l2"].get(horizon, []))
+            cosine_stats = summarize(
+                rollout_divergence[condition]["cosine"].get(horizon, [])
+            )
+            rows.append(
+                {
+                    "condition": condition,
+                    "horizon": horizon,
+                    "mean_l2": l2_stats["mean"],
+                    "std_l2": l2_stats["std"],
+                    "mean_cosine": cosine_stats["mean"],
+                    "std_cosine": cosine_stats["std"],
+                    "count": l2_stats["count"],
+                }
+            )
+    return rows
+
+
+def write_encoded_divergence_csv(path: Path, rows):
+    with path.open("w", newline="") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "condition",
+                "mean_l2",
+                "std_l2",
+                "mean_cosine",
+                "std_cosine",
+                "count",
+            ],
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def write_rollout_divergence_csv(path: Path, rows):
+    with path.open("w", newline="") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "condition",
+                "horizon",
+                "mean_l2",
+                "std_l2",
+                "mean_cosine",
+                "std_cosine",
+                "count",
+            ],
+        )
         writer.writeheader()
         writer.writerows(rows)
 
@@ -490,6 +730,12 @@ def print_summary(summary, prediction_rows, output_dir):
     corr = summary["action_sensitivity"].get("global_action_delta_correlation")
     if corr is not None:
         print(f"Global action/latent-delta correlation: {corr:.4f}")
+    conditions = summary.get("full_vs_masked_rollout_divergence", {}).get(
+        "conditions",
+        [],
+    )
+    if conditions:
+        print("Full-vs-masked rollout divergence conditions: " + ", ".join(conditions))
 
 
 def main():
@@ -510,6 +756,12 @@ def main():
     model.requires_grad_(False)
     history_size = infer_history_size(model, cfg)
     configure_dataset(cfg, args, history_size)
+    mask_conditions = build_mask_conditions(cfg, args)
+    if mask_conditions and not model_supports_missing_modalities(model):
+        raise ValueError(
+            "Full-vs-masked diagnostics require a model whose imputer/fusion "
+            "supports missing modalities."
+        )
 
     available_columns = get_dataset_columns(args.dataset, cache_dir)
     dataset, image_key, physical_keys = build_diagnostic_dataset(
@@ -541,6 +793,12 @@ def main():
     }
     global_pairs = {"latent_delta": [], "action_norm": []}
     prediction_errors = {h: [] for h in range(1, args.max_horizon + 1)}
+    encoded_divergence = {
+        condition: {"l2": [], "cosine": []} for condition, _ in mask_conditions
+    }
+    rollout_divergence = {
+        condition: {"l2": {}, "cosine": {}} for condition, _ in mask_conditions
+    }
     nn_storage = {"latents": [], "images": [], "physical": []}
 
     with torch.no_grad():
@@ -565,6 +823,39 @@ def main():
             ).items():
                 prediction_errors[horizon].extend(values)
 
+            if mask_conditions:
+                full_predictions = open_loop_predictions(
+                    model,
+                    emb,
+                    action,
+                    history_size,
+                    args.max_horizon,
+                )
+                for condition, drop_modalities in mask_conditions:
+                    masked_emb, _masked_action = encode_batch(
+                        model,
+                        mask_batch(batch_device, drop_modalities),
+                    )
+                    update_encoded_divergence(
+                        encoded_divergence,
+                        condition,
+                        emb,
+                        masked_emb,
+                    )
+                    masked_predictions = open_loop_predictions(
+                        model,
+                        masked_emb,
+                        action,
+                        history_size,
+                        args.max_horizon,
+                    )
+                    update_rollout_divergence(
+                        rollout_divergence,
+                        condition,
+                        full_predictions,
+                        masked_predictions,
+                    )
+
             append_nn_candidates(
                 nn_storage,
                 emb.detach().cpu(),
@@ -578,6 +869,16 @@ def main():
 
     prediction_rows = prediction_error_rows(prediction_errors)
     write_prediction_csv(output_dir / "prediction_error.csv", prediction_rows)
+    encoded_rows = encoded_divergence_rows(encoded_divergence)
+    rollout_rows = rollout_divergence_rows(rollout_divergence)
+    write_encoded_divergence_csv(
+        output_dir / "full_vs_masked_encoded_divergence.csv",
+        encoded_rows,
+    )
+    write_rollout_divergence_csv(
+        output_dir / "full_vs_masked_rollout_divergence.csv",
+        rollout_rows,
+    )
 
     latents = torch.cat(nn_storage["latents"], dim=0) if nn_storage["latents"] else None
     images = torch.cat(nn_storage["images"], dim=0) if nn_storage["images"] else None
@@ -615,6 +916,41 @@ def main():
             key: summarize(values) for key, values in action_metrics.items()
         },
         "prediction_error_csv": "prediction_error.csv",
+        "full_vs_masked_encoded_divergence_csv": (
+            "full_vs_masked_encoded_divergence.csv"
+        ),
+        "full_vs_masked_rollout_divergence_csv": (
+            "full_vs_masked_rollout_divergence.csv"
+        ),
+        "full_vs_masked_encoded_divergence": {
+            row["condition"]: {
+                key: value
+                for key, value in row.items()
+                if key != "condition"
+            }
+            for row in encoded_rows
+        },
+        "full_vs_masked_rollout_divergence": {
+            "conditions": [condition for condition, _ in mask_conditions],
+            "drop_modalities": {
+                condition: drop_modalities
+                for condition, drop_modalities in mask_conditions
+            },
+            "by_condition_horizon": {
+                row["condition"]: {
+                    **{
+                        str(other["horizon"]): {
+                            key: value
+                            for key, value in other.items()
+                            if key not in {"condition", "horizon"}
+                        }
+                        for other in rollout_rows
+                        if other["condition"] == row["condition"]
+                    }
+                }
+                for row in rollout_rows
+            },
+        },
         "nearest_neighbor_csv": "nearest_neighbors.csv",
         "nearest_neighbor_images": len(
             sorted((output_dir / "nearest_neighbors").glob("*.png"))
