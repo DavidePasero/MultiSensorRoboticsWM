@@ -13,17 +13,21 @@ NUM_WORKERS="${NUM_WORKERS:-1}"
 DEVICE="${DEVICE:-}"
 
 # Leave empty to run only all_modalities + drop_each_modality conditions.
-# Otherwise, this adds one extra condition that keeps only these modalities and
-# masks all the others through the model imputer.
-KEEP_MODALITIES=(
+# Each entry adds one extra keep-only condition. A single word keeps one
+# modality; multiple words in one entry keep that group together.
+KEEP_MODALITY_GROUPS=(
   "pixels"
   "depth"
+  "tactile"
+  "proprio"
+  "force_torque"
 )
 
 KEEP_MODALITIES_ARGS=()
-if [[ "${#KEEP_MODALITIES[@]}" -gt 0 ]]; then
-  KEEP_MODALITIES_ARGS=(--keep-modalities "${KEEP_MODALITIES[@]}")
-fi
+for keep_group in "${KEEP_MODALITY_GROUPS[@]}"; do
+  read -r -a keep_modalities <<< "$keep_group"
+  KEEP_MODALITIES_ARGS+=(--keep-modalities "${keep_modalities[@]}")
+done
 
 DEVICE_ARGS=()
 if [[ -n "$DEVICE" ]]; then
@@ -37,10 +41,10 @@ echo "DATASET_NAME=$DATASET_NAME"
 echo "OUTPUT_DIR=$OUTPUT_DIR"
 echo "BATCH_SIZE=$BATCH_SIZE"
 echo "NUM_WORKERS=$NUM_WORKERS"
-if [[ "${#KEEP_MODALITIES[@]}" -gt 0 ]]; then
-  echo "KEEP_MODALITIES=[${KEEP_MODALITIES[*]}]"
+if [[ "${#KEEP_MODALITY_GROUPS[@]}" -gt 0 ]]; then
+  echo "KEEP_MODALITY_GROUPS=[${KEEP_MODALITY_GROUPS[*]}]"
 else
-  echo "KEEP_MODALITIES=[]"
+  echo "KEEP_MODALITY_GROUPS=[]"
 fi
 echo "----------------------------------"
 

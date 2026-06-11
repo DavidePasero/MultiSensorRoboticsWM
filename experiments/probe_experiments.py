@@ -57,6 +57,12 @@ def parse_args():
     parser.add_argument("--cache-dir", type=Path, default=None)
     parser.add_argument("--dataset-name", type=str, default=None)
     parser.add_argument(
+        "--keys-to-cache",
+        nargs="*",
+        default=None,
+        help="Override data.dataset.keys_to_cache. Use no values to disable caching.",
+    )
+    parser.add_argument(
         "--representation",
         type=str,
         default="fused",
@@ -337,6 +343,8 @@ def main():
         config_path=args.config,
         dataset_name=args.dataset_name,
     )
+    if args.keys_to_cache is not None:
+        cfg.data.dataset.keys_to_cache = list(args.keys_to_cache)
 
     available_columns = get_dataset_columns(cfg.data.dataset.name, cache_dir)
     specs = get_experiment_specs()

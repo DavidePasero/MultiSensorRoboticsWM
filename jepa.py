@@ -71,10 +71,17 @@ class JEPA(nn.Module):
         obs_source = getattr(self.encoder, "primary_source", "pixels")
         assert obs_source in info, f"{obs_source} not in info_dict"
         H = info[obs_source].size(2)
-        B, S, T = action_sequence.shape[:3]
-        act_0, act_future = torch.split(action_sequence, [H, T - H], dim=2)
+        B, S, horizon = action_sequence.shape[:3]
+
+        if H > 1 and "action" in info:
+            action_history = torch.nan_to_num(info["action"], 0.0)
+            past_actions = action_history[:, :, -(H - 1) :]
+        else:
+            past_actions = action_sequence[:, :, :0]
+
+        current_action = action_sequence[:, :, :1]
+        act_0 = torch.cat([past_actions, current_action], dim=2)
         info["action"] = act_0
-        n_steps = T - H
 
         # copy and encode initial info dict
         _init = {k: v[:, 0] for k, v in info.items() if torch.is_tensor(v)}
@@ -85,26 +92,20 @@ class JEPA(nn.Module):
         # flatten batch and sample dimensions for rollout
         emb = rearrange(emb, "b s ... -> (b s) ...").clone()
         act = rearrange(act_0, "b s ... -> (b s) ...")
-        act_future = rearrange(act_future, "b s ... -> (b s) ...")
+        act_future = rearrange(action_sequence[:, :, 1:], "b s ... -> (b s) ...")
 
         # rollout predictor autoregressively for n_steps
         HS = history_size
-        for t in range(n_steps):
+        for t in range(horizon):
             act_emb = self.action_encoder(act)
             emb_trunc = emb[:, -HS:]  # (BS, HS, D)
             act_trunc = act_emb[:, -HS:]  # (BS, HS, A_emb)
             pred_emb = self.predict(emb_trunc, act_trunc)[:, -1:]  # (BS, 1, D)
             emb = torch.cat([emb, pred_emb], dim=1)  # (BS, T+1, D)
 
-            next_act = act_future[:, t : t + 1, :]  # (BS, 1, action_dim)
-            act = torch.cat([act, next_act], dim=1)  # (BS, T+1, action_dim)
-
-        # predict the last state
-        act_emb = self.action_encoder(act)  # (BS, T, A_emb)
-        emb_trunc = emb[:, -HS:]  # (BS, HS, D)
-        act_trunc = act_emb[:, -HS:]  # (BS, HS, A_emb)
-        pred_emb = self.predict(emb_trunc, act_trunc)[:, -1:]  # (BS, 1, D)
-        emb = torch.cat([emb, pred_emb], dim=1)
+            if t < horizon - 1:
+                next_act = act_future[:, t : t + 1, :]  # (BS, 1, action_dim)
+                act = torch.cat([act, next_act], dim=1)  # (BS, T+1, action_dim)
 
         # unflatten batch and sample dimensions
         pred_rollout = rearrange(emb, "(b s) ... -> b s ...", b=B, s=S)

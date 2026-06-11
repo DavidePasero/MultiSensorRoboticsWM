@@ -71,7 +71,17 @@ def parse_args():
     parser.add_argument("--checkpoint", type=str, default=None)
     parser.add_argument("--targets", nargs="+", default=None)
     parser.add_argument("--loss-weight", action="append", default=[])
-    parser.add_argument("--keep-modalities", nargs="+", default=None)
+    parser.add_argument(
+        "--keep-modalities",
+        nargs="+",
+        action="append",
+        default=[],
+        help=(
+            "Additional keep-only condition. Repeatable. Example: "
+            "--keep-modalities pixels --keep-modalities depth "
+            "--keep-modalities pixels depth."
+        ),
+    )
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--num-workers", type=int, default=1)
     parser.add_argument("--device", default=None)
@@ -200,13 +210,13 @@ def config_modality_sources(cfg) -> list[str]:
     return sources
 
 
-def build_conditions(sources: list[str], keep_modalities: list[str] | None):
+def build_conditions(sources: list[str], keep_modality_groups: list[list[str]]):
     conditions = [("all_modalities", [])]
     for source in sources:
         if len(sources) > 1:
             conditions.append((f"drop_{source}", [source]))
 
-    if keep_modalities is not None:
+    for keep_modalities in keep_modality_groups:
         unknown = [modality for modality in keep_modalities if modality not in sources]
         if unknown:
             raise ValueError(

@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import argparse
 import csv
+import h5py
 import json
 import os
 import re
+import shlex
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +26,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib import colors as mcolors
 import numpy as np
 import torch
 from omegaconf import OmegaConf, open_dict
@@ -57,11 +60,15 @@ DEFAULT_METADATA_KEYS = (
     "target_pos",
 )
 DEFAULT_COLOR_KEYS = (
-    "step_idx",
-    "ee_object_distance",
-    "ee_target_distance",
-    "bool_contact",
-    "success",
+    "episode_idx",
+)
+EPISODE_COLORS = ("#008B21", "#5F0FF8", "#F5A12E", "#0053E9", "#A50025")
+DEFAULT_EXCLUDED_MODEL_PATTERNS = (
+    "masked",
+    "selfmask",
+    "missing_token",
+    "latent_reconstruction",
+    "latent-reconstruction",
 )
 
 
@@ -123,6 +130,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--num_clips", type=int, default=256)
     parser.add_argument(
+        "--num-episodes",
+        type=int,
+        default=5,
+        help=(
+            "Number of episodes to visualize. The default selects exactly five "
+            "episodes and colors them with a fixed palette. Set to 0 to use the "
+            "old random-clip sampling behavior."
+        ),
+    )
+    parser.add_argument(
         "--num_steps",
         type=int,
         default=None,
@@ -157,7 +174,76 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--point-size", type=float, default=6.0)
     parser.add_argument("--alpha", type=float, default=0.72)
+    parser.add_argument(
+        "--episode-min-alpha",
+        type=float,
+        default=0.08,
+        help=(
+            "Minimum opacity for the first step of each episode in episode_idx "
+            "plots. The opacity then increases linearly with step_idx up to --alpha."
+        ),
+    )
+    parser.add_argument(
+        "--episode-colors",
+        nargs="+",
+        default=list(EPISODE_COLORS),
+        help="Colors used for episode_idx plots when --num-episodes is enabled.",
+    )
+    parser.add_argument(
+        "--include-masked-models",
+        action="store_true",
+        help="Do not filter out masked/selfmask/latent-reconstruction variants.",
+    )
+    parser.add_argument(
+        "--planning-log",
+        action="append",
+        type=Path,
+        default=[],
+        help=(
+            "Planning run log to use for prioritizing visualized episodes. "
+            "Can be passed multiple times."
+        ),
+    )
+    parser.add_argument(
+        "--planning-log-dir",
+        action="append",
+        type=Path,
+        default=[],
+        help="Directory searched recursively for planning *.log files.",
+    )
+    parser.add_argument(
+        "--planning-model-filter",
+        action="append",
+        default=[],
+        help=(
+            "Only use planning logs whose model label or policy contains this "
+            "substring. Repeatable. Defaults to all logs."
+        ),
+    )
+    parser.add_argument(
+        "--planning-outcome",
+        choices=("mixed", "success", "failure", "any"),
+        default="mixed",
+        help=(
+            "How planning logs choose episodes. mixed selects successful episodes "
+            "first and keeps some failed ones for contrast."
+        ),
+    )
+    parser.add_argument(
+        "--planning-default-goal-offset-steps",
+        type=int,
+        default=20,
+        help=(
+            "Fallback goal offset used only for planning logs that contain "
+            "METRICS_JSON but not the original Hydra command."
+        ),
+    )
     return parser.parse_args()
+
+
+def is_excluded_model_variant(spec: CheckpointSpec) -> bool:
+    text = f"{spec.label} {spec.checkpoint}".lower()
+    return any(pattern in text for pattern in DEFAULT_EXCLUDED_MODEL_PATTERNS)
 
 
 def enabled_model_sources(cfg) -> set[str]:
@@ -196,6 +282,430 @@ def sample_indices(dataset_len: int, count: int, seed: int) -> list[int]:
     count = min(int(count), dataset_len)
     rng = np.random.default_rng(seed)
     return rng.choice(dataset_len, size=count, replace=False).tolist()
+
+
+def sample_episode_clip_indices(
+    dataset,
+    *,
+    episode_count: int,
+    seed: int,
+    max_dataset_len: int | None = None,
+    preferred_episodes: list[int] | None = None,
+) -> tuple[list[int], list[int]]:
+    column_names = set(getattr(dataset, "column_names", []))
+    episode_key = "episode_idx" if "episode_idx" in column_names else "ep_idx"
+    if episode_key not in column_names:
+        raise ValueError(
+            "Episode-based latent visualization requires an episode_idx or ep_idx "
+            "column in the dataset. Use --num-episodes 0 to fall back to random clips."
+        )
+
+    clip_count = len(dataset)
+    if max_dataset_len is not None:
+        clip_count = min(clip_count, int(max_dataset_len))
+    if clip_count <= 0:
+        raise ValueError("Dataset produced no valid clips.")
+
+    row_episode_idx = np.asarray(dataset.get_col_data(episode_key)).reshape(-1)
+    if all(
+        hasattr(dataset, attr)
+        for attr in (
+            "clip_shard_indices",
+            "clip_episode_indices",
+            "clip_start_indices",
+            "_shards",
+            "_row_ranges",
+        )
+    ):
+        clip_global_rows = np.empty(clip_count, dtype=np.int64)
+        clip_shard_indices = np.asarray(dataset.clip_shard_indices[:clip_count])
+        clip_episode_indices = np.asarray(dataset.clip_episode_indices[:clip_count])
+        clip_start_indices = np.asarray(dataset.clip_start_indices[:clip_count])
+
+        for shard_idx, shard in enumerate(dataset._shards):
+            mask = clip_shard_indices == shard_idx
+            if not np.any(mask):
+                continue
+            local_eps = clip_episode_indices[mask].astype(np.int64)
+            starts = clip_start_indices[mask].astype(np.int64)
+            row_base = int(dataset._row_ranges[shard_idx][0])
+            clip_global_rows[mask] = row_base + shard["offsets"][local_eps] + starts
+    elif all(hasattr(dataset, attr) for attr in ("clip_indices", "offsets")):
+        clip_indices = list(dataset.clip_indices[:clip_count])
+        clip_global_rows = np.asarray(
+            [int(dataset.offsets[int(ep_idx)] + int(start)) for ep_idx, start in clip_indices],
+            dtype=np.int64,
+        )
+    else:
+        raise ValueError(
+            "Episode-based latent visualization requires clip index metadata. "
+            "Use --num-episodes 0 to fall back to random clips."
+        )
+
+    clip_episode_ids = row_episode_idx[clip_global_rows]
+    unique_episodes = np.unique(clip_episode_ids)
+    if unique_episodes.size == 0:
+        raise ValueError("No episodes were available for visualization.")
+
+    rng = np.random.default_rng(seed)
+    count = min(int(episode_count), int(unique_episodes.size))
+    if preferred_episodes:
+        available = set(int(ep) for ep in unique_episodes.tolist())
+        selected = []
+        for ep in preferred_episodes:
+            ep = int(ep)
+            if ep in available and ep not in selected:
+                selected.append(ep)
+            if len(selected) >= count:
+                break
+
+        if len(selected) < count:
+            remaining = np.asarray(
+                [int(ep) for ep in unique_episodes.tolist() if int(ep) not in selected],
+                dtype=np.int64,
+            )
+            if remaining.size > 0:
+                fill = rng.choice(
+                    remaining,
+                    size=min(count - len(selected), int(remaining.size)),
+                    replace=False,
+                )
+                selected.extend(int(ep) for ep in fill.tolist())
+        selected_episodes = np.asarray(selected[:count], dtype=np.int64)
+    else:
+        selected_episodes = np.sort(
+            rng.choice(unique_episodes, size=count, replace=False)
+        )
+    indices = np.flatnonzero(np.isin(clip_episode_ids, selected_episodes)).tolist()
+    if not indices:
+        raise ValueError("Selected episodes produced no valid clips.")
+
+    return indices, [int(ep) for ep in selected_episodes.tolist()]
+
+
+def collect_planning_log_paths(args: argparse.Namespace) -> list[Path]:
+    paths = [path.expanduser() for path in args.planning_log]
+    for directory in args.planning_log_dir:
+        directory = directory.expanduser()
+        if directory.exists():
+            paths.extend(
+                path
+                for path in sorted(directory.rglob("*.log"))
+                if path.name != "planning_runs.log"
+            )
+
+    unique = []
+    seen = set()
+    for path in paths:
+        path = path.resolve()
+        if path.name == "planning_runs.log":
+            continue
+        if path in seen or not path.exists():
+            continue
+        seen.add(path)
+        unique.append(path)
+    return unique
+
+
+def parse_planning_log(path: Path, *, default_goal_offset_steps: int) -> dict | None:
+    text = path.read_text(errors="replace")
+    command_match = re.search(r"^Command:\s*(.+)$", text, flags=re.MULTILINE)
+    metrics_match = re.findall(r"^METRICS_JSON=(.+)$", text, flags=re.MULTILINE)
+    if not metrics_match:
+        return None
+
+    overrides = {}
+    if command_match is not None:
+        for token in shlex.split(command_match.group(1)):
+            if "=" not in token:
+                continue
+            key, value = token.split("=", 1)
+            overrides[key] = value
+
+    header_match = re.search(
+        r"^=== TASK=(?P<task>.*?) MODEL=(?P<model>.*?) RUN=(?P<run>\d+) SEED=(?P<seed>\d+) ===$",
+        text,
+        flags=re.MULTILINE,
+    )
+    filename_match = re.match(
+        r"(?P<task>.*?)__(?P<model>.*?)__run_(?P<run>\d+)\.log$",
+        path.name,
+    )
+    run_id = (
+        int(header_match.group("run"))
+        if header_match
+        else int(filename_match.group("run"))
+        if filename_match
+        else 1
+    )
+    metrics = json.loads(metrics_match[-1])
+    return {
+        "path": str(path),
+        "task": overrides.get(
+            "world.metaworld_env_name",
+            header_match.group("task")
+            if header_match
+            else filename_match.group("task")
+            if filename_match
+            else None,
+        ),
+        "model": (
+            header_match.group("model")
+            if header_match
+            else filename_match.group("model")
+            if filename_match
+            else None
+        ),
+        "policy": overrides.get("policy"),
+        "dataset": overrides.get("eval.dataset_name"),
+        "seed": int(
+            overrides.get(
+                "seed",
+                header_match.group("seed") if header_match else 41 + run_id,
+            )
+        ),
+        "num_eval": int(overrides.get("eval.num_eval", len(metrics.get("episode_successes", [])))),
+        "goal_sampling": overrides.get("eval.goal_sampling", "first_success"),
+        "goal_success_key": overrides.get("eval.goal_success_key", "success"),
+        "goal_offset_steps": int(
+            overrides.get("eval.goal_offset_steps", default_goal_offset_steps)
+        ),
+        "metrics": metrics,
+    }
+
+
+def resolve_planning_env_idx(dataset, task_name: str | None) -> int | None:
+    if task_name is None or "env_idx" not in getattr(dataset, "column_names", []):
+        return None
+    h5_path = getattr(dataset, "h5_path", None)
+    if h5_path is None:
+        return None
+    with h5py.File(h5_path, "r") as h5_file:
+        names_json = h5_file.attrs.get("env_names_json", None)
+    if names_json is None:
+        return None
+    env_names = json.loads(names_json)
+    return int(env_names.index(task_name)) if task_name in env_names else None
+
+
+def recover_first_success_eval_pairs(dataset, record: dict) -> tuple[np.ndarray, np.ndarray]:
+    col_name = "episode_idx" if "episode_idx" in dataset.column_names else "ep_idx"
+    episode_idx = np.asarray(dataset.get_col_data(col_name)).reshape(-1)
+    step_idx = np.asarray(dataset.get_col_data("step_idx")).reshape(-1)
+    success_values = np.asarray(dataset.get_col_data(record["goal_success_key"]))
+    successes = success_values.reshape(success_values.shape[0], -1).any(axis=1)
+    env_idx = None
+    resolved_env_idx = resolve_planning_env_idx(dataset, record.get("task"))
+    if resolved_env_idx is not None and "env_idx" in dataset.column_names:
+        env_idx = np.asarray(dataset.get_col_data("env_idx")).reshape(-1)
+
+    candidate_episodes = []
+    candidate_starts = []
+    start_offset = int(record["goal_offset_steps"])
+    for ep_id in np.unique(episode_idx):
+        mask = episode_idx == ep_id
+        if env_idx is not None:
+            mask &= env_idx == resolved_env_idx
+        if not np.any(mask):
+            continue
+
+        steps = step_idx[mask].astype(np.int64)
+        ep_successes = successes[mask]
+        order = np.argsort(steps)
+        steps = steps[order]
+        ep_successes = ep_successes[order]
+        success_positions = np.flatnonzero(ep_successes)
+        if success_positions.size == 0:
+            continue
+
+        goal_step = int(steps[success_positions[0]])
+        start_step = goal_step - start_offset
+        if start_step < int(steps[0]) or not np.any(steps == start_step):
+            continue
+        candidate_episodes.append(int(ep_id))
+        candidate_starts.append(start_step)
+
+    if len(candidate_episodes) < int(record["num_eval"]):
+        raise ValueError(
+            f"Could not recover enough planning eval episodes from {record['path']}: "
+            f"found {len(candidate_episodes)}, need {record['num_eval']}."
+        )
+
+    rng = np.random.default_rng(int(record["seed"]))
+    selected = np.sort(
+        rng.choice(
+            len(candidate_episodes),
+            size=int(record["num_eval"]),
+            replace=False,
+        )
+    )
+    return (
+        np.asarray(candidate_episodes, dtype=np.int64)[selected],
+        np.asarray(candidate_starts, dtype=np.int64)[selected],
+    )
+
+
+def recover_fixed_offset_eval_pairs(dataset, record: dict) -> tuple[np.ndarray, np.ndarray]:
+    col_name = "episode_idx" if "episode_idx" in dataset.column_names else "ep_idx"
+    episode_idx = np.asarray(dataset.get_col_data(col_name)).reshape(-1)
+    step_idx = np.asarray(dataset.get_col_data("step_idx")).reshape(-1)
+    env_idx = None
+    resolved_env_idx = resolve_planning_env_idx(dataset, record.get("task"))
+    if resolved_env_idx is not None and "env_idx" in dataset.column_names:
+        env_idx = np.asarray(dataset.get_col_data("env_idx")).reshape(-1)
+
+    goal_offset = int(record["goal_offset_steps"]) + 1
+    max_start_by_episode = {}
+    for ep_id in np.unique(episode_idx):
+        mask = episode_idx == ep_id
+        if env_idx is not None:
+            mask &= env_idx == resolved_env_idx
+        if not np.any(mask):
+            continue
+        max_start_by_episode[int(ep_id)] = int(np.max(step_idx[mask]) + 1 - goal_offset - 1)
+
+    valid_mask = np.asarray(
+        [
+            int(step) <= max_start_by_episode.get(int(ep), -1)
+            for ep, step in zip(episode_idx, step_idx)
+        ],
+        dtype=bool,
+    )
+    if env_idx is not None:
+        valid_mask &= env_idx == resolved_env_idx
+    valid_indices = np.nonzero(valid_mask)[0]
+    if len(valid_indices) < int(record["num_eval"]):
+        raise ValueError(
+            f"Could not recover enough fixed-offset planning rows from {record['path']}: "
+            f"found {len(valid_indices)}, need {record['num_eval']}."
+        )
+
+    rng = np.random.default_rng(int(record["seed"]))
+    selected_rows = np.sort(
+        valid_indices[
+            rng.choice(len(valid_indices), size=int(record["num_eval"]), replace=False)
+        ]
+    )
+    rows = dataset.get_row_data(selected_rows.tolist())
+    return np.asarray(rows[col_name], dtype=np.int64), np.asarray(rows["step_idx"], dtype=np.int64)
+
+
+def planning_episode_priority(
+    *,
+    dataset,
+    dataset_name: str,
+    log_paths: list[Path],
+    model_filters: list[str],
+    outcome: str,
+    max_episodes: int,
+    default_goal_offset_steps: int,
+    excluded_model_patterns: tuple[str, ...] = (),
+) -> tuple[list[int], dict[int, dict]]:
+    if not log_paths:
+        return [], {}
+
+    filters = [item.lower() for item in model_filters]
+    stats: dict[int, dict] = {}
+    for path in log_paths:
+        record = parse_planning_log(
+            path,
+            default_goal_offset_steps=default_goal_offset_steps,
+        )
+        if record is None:
+            continue
+        if record.get("dataset") and record["dataset"] != dataset_name:
+            continue
+        searchable = " ".join(
+            str(record.get(key) or "") for key in ("model", "policy", "task", "path")
+        ).lower()
+        if any(pattern in searchable for pattern in excluded_model_patterns):
+            continue
+        if filters and not any(item in searchable for item in filters):
+            continue
+
+        try:
+            if record["goal_sampling"] == "first_success":
+                episodes, starts = recover_first_success_eval_pairs(dataset, record)
+            else:
+                episodes, starts = recover_fixed_offset_eval_pairs(dataset, record)
+        except (KeyError, ValueError) as exc:
+            print(f"Skipping planning log {path}: {exc}", flush=True)
+            continue
+        successes = list(record["metrics"].get("episode_successes", []))
+        for ep, start, success in zip(episodes, starts, successes):
+            ep = int(ep)
+            entry = stats.setdefault(
+                ep,
+                {
+                    "episode_idx": ep,
+                    "success_count": 0,
+                    "failure_count": 0,
+                    "total_count": 0,
+                    "starts": [],
+                    "models": set(),
+                },
+            )
+            entry["success_count"] += int(bool(success))
+            entry["failure_count"] += int(not bool(success))
+            entry["total_count"] += 1
+            entry["starts"].append(int(start))
+            if record.get("model"):
+                entry["models"].add(str(record["model"]))
+
+    if not stats:
+        return [], {}
+
+    def success_key(item):
+        ep, entry = item
+        return (-entry["success_count"], -entry["total_count"], ep)
+
+    def failure_key(item):
+        ep, entry = item
+        return (-entry["failure_count"], -entry["total_count"], ep)
+
+    def any_key(item):
+        ep, entry = item
+        return (-entry["total_count"], -entry["success_count"], ep)
+
+    success_pool = sorted(
+        [(ep, entry) for ep, entry in stats.items() if entry["success_count"] > 0],
+        key=success_key,
+    )
+    failure_pool = sorted(
+        [(ep, entry) for ep, entry in stats.items() if entry["failure_count"] > 0],
+        key=failure_key,
+    )
+
+    ordered = []
+    if outcome == "success":
+        ordered = [ep for ep, _entry in success_pool]
+    elif outcome == "failure":
+        ordered = [ep for ep, _entry in failure_pool]
+    elif outcome == "any":
+        ordered = [ep for ep, _entry in sorted(stats.items(), key=any_key)]
+    else:
+        target_success = max_episodes if not failure_pool else (max_episodes + 1) // 2
+        ordered.extend(ep for ep, _entry in success_pool[:target_success])
+        ordered.extend(ep for ep, _entry in failure_pool if ep not in ordered)
+        ordered.extend(
+            ep
+            for ep, _entry in sorted(stats.items(), key=any_key)
+            if ep not in ordered
+        )
+
+    for entry in stats.values():
+        entry["models"] = sorted(entry["models"])
+    return ordered[:max_episodes], stats
+
+
+def planning_episode_labels(stats: dict[int, dict]) -> dict[int, str]:
+    labels = {}
+    for ep, entry in stats.items():
+        labels[int(ep)] = (
+            f"ep {int(ep)} "
+            f"S={int(entry['success_count'])} F={int(entry['failure_count'])}"
+        )
+    return labels
 
 
 def move_to_device(value, device):
@@ -348,6 +858,47 @@ def select_points(num_points: int, max_points: int, seed: int) -> np.ndarray:
     return np.sort(rng.choice(num_points, size=count, replace=False))
 
 
+def select_points_balanced_by_episode(
+    metadata: dict[str, np.ndarray],
+    total_points: int,
+    max_points: int,
+    seed: int,
+) -> np.ndarray:
+    if "episode_idx" not in metadata:
+        return select_points(total_points, max_points, seed)
+
+    values = np.asarray(metadata["episode_idx"][:total_points]).reshape(-1)
+    unique = np.unique(values)
+    if unique.size == 0:
+        return select_points(total_points, max_points, seed)
+
+    rng = np.random.default_rng(seed)
+    max_points = min(int(max_points), int(total_points))
+    per_episode = max(1, max_points // int(unique.size))
+    selected = []
+    selected_set = set()
+
+    for ep in unique:
+        candidates = np.flatnonzero(values == ep)
+        if candidates.size == 0:
+            continue
+        take = min(per_episode, int(candidates.size))
+        chosen = rng.choice(candidates, size=take, replace=False)
+        selected.extend(chosen.tolist())
+        selected_set.update(int(idx) for idx in chosen.tolist())
+
+    if len(selected) < max_points:
+        remaining = np.asarray(
+            [idx for idx in range(total_points) if idx not in selected_set],
+            dtype=np.int64,
+        )
+        if remaining.size > 0:
+            take = min(max_points - len(selected), int(remaining.size))
+            selected.extend(rng.choice(remaining, size=take, replace=False).tolist())
+
+    return np.asarray(sorted(selected[:max_points]), dtype=np.int64)
+
+
 def compute_pca(latents: np.ndarray, seed: int):
     if len(latents) < 2:
         return None, None
@@ -409,6 +960,10 @@ def plot_projection_grid(
     point_size: float,
     alpha: float,
     explained_variance: dict[str, list[float]] | None = None,
+    episode_colors: list[str] | None = None,
+    episode_alpha_values: np.ndarray | None = None,
+    episode_order: list[int] | None = None,
+    episode_labels: dict[int, str] | None = None,
 ):
     labels = list(projections.keys())
     ncols = min(3, len(labels))
@@ -420,8 +975,20 @@ def plot_projection_grid(
         squeeze=False,
     )
     axes_flat = axes.ravel()
-    finite = np.isfinite(values.astype(np.float64, copy=False))
-    binary = is_binary(values)
+    values_numeric = values.astype(np.float64, copy=False)
+    finite = np.isfinite(values_numeric)
+    episode_colors = episode_colors or list(EPISODE_COLORS)
+    episode_plot = (
+        color_key == "episode_idx"
+        and finite.any()
+        and np.unique(values_numeric[finite]).size <= len(episode_colors)
+    )
+    if episode_plot and episode_order is not None:
+        available_episode_ids = set(int(ep) for ep in np.unique(values_numeric[finite]))
+        episode_ids = [int(ep) for ep in episode_order if int(ep) in available_episode_ids]
+    else:
+        episode_ids = np.unique(values_numeric[finite]).tolist() if episode_plot else []
+    binary = False if episode_plot else is_binary(values)
     cmap = "coolwarm" if binary else "viridis"
     vmin = 0.0 if binary else None
     vmax = 1.0 if binary else None
@@ -443,17 +1010,52 @@ def plot_projection_grid(
                 alpha=0.35,
                 linewidths=0,
             )
-        scatter = ax.scatter(
-            coords[finite, 0],
-            coords[finite, 1],
-            s=point_size,
-            c=values[finite],
-            cmap=cmap,
-            vmin=vmin,
-            vmax=vmax,
-            alpha=alpha,
-            linewidths=0,
-        )
+        if episode_plot:
+            for ep, color in zip(episode_ids, episode_colors):
+                ep_mask = finite & (values_numeric == ep)
+                if not np.any(ep_mask):
+                    continue
+                base_color = np.asarray(mcolors.to_rgba(color), dtype=np.float64)
+                point_colors = np.tile(base_color, (int(ep_mask.sum()), 1))
+                if episode_alpha_values is not None:
+                    point_alphas = np.asarray(episode_alpha_values[ep_mask], dtype=float)
+                    point_colors[:, 3] = np.clip(point_alphas, 0.0, 1.0)
+                else:
+                    point_colors[:, 3] = alpha
+                order = np.argsort(point_colors[:, 3])
+                ep_coords = coords[ep_mask]
+                ax.scatter(
+                    ep_coords[order, 0],
+                    ep_coords[order, 1],
+                    s=point_size,
+                    c=point_colors[order],
+                    linewidths=0,
+                )
+                ax.scatter(
+                    [],
+                    [],
+                    s=point_size,
+                    c=color,
+                    label=(
+                        episode_labels.get(int(ep), f"episode {int(ep)}")
+                        if episode_labels is not None
+                        else f"episode {int(ep)}"
+                    ),
+                    alpha=1.0,
+                    linewidths=0,
+                )
+        else:
+            scatter = ax.scatter(
+                coords[finite, 0],
+                coords[finite, 1],
+                s=point_size,
+                c=values[finite],
+                cmap=cmap,
+                vmin=vmin,
+                vmax=vmax,
+                alpha=alpha,
+                linewidths=0,
+            )
         title = label
         x_label = f"{method.upper()} 1"
         y_label = f"{method.upper()} 2"
@@ -469,11 +1071,13 @@ def plot_projection_grid(
         ax.set_xlabel(x_label)
         ax.set_ylabel(y_label)
         ax.grid(True, linewidth=0.25, alpha=0.35)
+        if episode_plot:
+            ax.legend(loc="best", fontsize=7, frameon=False)
 
     for ax in axes_flat[len(labels) :]:
         ax.axis("off")
 
-    if scatter is not None:
+    if scatter is not None and not episode_plot:
         cbar = fig.colorbar(scatter, ax=axes_flat[: len(labels)], shrink=0.82)
         cbar.set_label(color_key)
         if binary:
@@ -482,6 +1086,39 @@ def plot_projection_grid(
     fig.suptitle(f"{method.upper()} latent visualization colored by {color_key}")
     fig.savefig(output_path, dpi=180, bbox_inches="tight")
     plt.close(fig)
+
+
+def episode_step_alphas(
+    metadata: dict[str, np.ndarray],
+    selection: np.ndarray,
+    *,
+    max_alpha: float,
+    min_alpha: float,
+) -> np.ndarray | None:
+    if "episode_idx" not in metadata or "step_idx" not in metadata:
+        return None
+
+    episodes = np.asarray(metadata["episode_idx"])[selection].reshape(-1)
+    steps = np.asarray(metadata["step_idx"])[selection].reshape(-1).astype(np.float64)
+    alphas = np.full(len(selection), float(max_alpha), dtype=np.float64)
+    min_alpha = float(np.clip(min_alpha, 0.0, max_alpha))
+
+    for ep in np.unique(episodes):
+        mask = episodes == ep
+        ep_steps = steps[mask]
+        finite = np.isfinite(ep_steps)
+        if not finite.any():
+            continue
+        lo = float(np.nanmin(ep_steps[finite]))
+        hi = float(np.nanmax(ep_steps[finite]))
+        if abs(hi - lo) < EPS:
+            norm = np.ones_like(ep_steps, dtype=np.float64)
+        else:
+            norm = (ep_steps - lo) / (hi - lo)
+        norm = np.nan_to_num(norm, nan=1.0, posinf=1.0, neginf=0.0)
+        alphas[mask] = min_alpha + np.clip(norm, 0.0, 1.0) * (max_alpha - min_alpha)
+
+    return alphas
 
 
 def write_projection_csv(
@@ -516,8 +1153,29 @@ def write_projection_csv(
 
 def main():
     args = parse_args()
+    if not args.include_masked_models:
+        kept = []
+        skipped = []
+        for spec in args.checkpoint:
+            if is_excluded_model_variant(spec):
+                skipped.append(spec.label)
+            else:
+                kept.append(spec)
+        if skipped:
+            print(
+                "Skipping masked/imputer variants: " + ", ".join(skipped),
+                flush=True,
+            )
+        args.checkpoint = kept
+    if not args.checkpoint:
+        raise ValueError("No checkpoints left to visualize after model filtering.")
     if len({spec.label for spec in args.checkpoint}) != len(args.checkpoint):
         raise ValueError("Checkpoint labels must be unique.")
+    if args.num_episodes > len(args.episode_colors):
+        raise ValueError(
+            f"--num-episodes={args.num_episodes} needs at least that many "
+            f"--episode-colors, got {len(args.episode_colors)}."
+        )
 
     cache_dir = args.cache_dir.expanduser() if args.cache_dir is not None else None
     config_overrides = dict(args.config)
@@ -560,7 +1218,51 @@ def main():
             }
         )
 
-    indices = sample_indices(int(min_dataset_len), args.num_clips, args.seed)
+    planning_log_paths = collect_planning_log_paths(args)
+    planning_preferred_episodes: list[int] = []
+    planning_stats: dict[int, dict] = {}
+    if args.num_episodes > 0 and planning_log_paths:
+        planning_preferred_episodes, planning_stats = planning_episode_priority(
+            dataset=prepared[0]["dataset"],
+            dataset_name=args.dataset,
+            log_paths=planning_log_paths,
+            model_filters=args.planning_model_filter,
+            outcome=args.planning_outcome,
+            max_episodes=args.num_episodes,
+            default_goal_offset_steps=args.planning_default_goal_offset_steps,
+            excluded_model_patterns=(
+                ()
+                if args.include_masked_models
+                else DEFAULT_EXCLUDED_MODEL_PATTERNS
+            ),
+        )
+        if planning_preferred_episodes:
+            print(
+                "Planning-prioritized episodes: "
+                + ", ".join(str(ep) for ep in planning_preferred_episodes),
+                flush=True,
+            )
+        else:
+            print(
+                "No matching planning episodes recovered; falling back to random episodes.",
+                flush=True,
+            )
+
+    selected_episodes = None
+    if args.num_episodes > 0:
+        indices, selected_episodes = sample_episode_clip_indices(
+            prepared[0]["dataset"],
+            episode_count=args.num_episodes,
+            seed=args.seed,
+            max_dataset_len=int(min_dataset_len),
+            preferred_episodes=planning_preferred_episodes,
+        )
+        print(
+            "Selected episodes: " + ", ".join(str(ep) for ep in selected_episodes),
+            flush=True,
+        )
+    else:
+        indices = sample_indices(int(min_dataset_len), args.num_clips, args.seed)
     latents_by_model = {}
     metadata = None
     model_summaries = {}
@@ -593,7 +1295,15 @@ def main():
 
     assert metadata is not None
     total_points = min(latents.shape[0] for latents in latents_by_model.values())
-    selection = select_points(total_points, args.max_points, args.seed)
+    if args.num_episodes > 0:
+        selection = select_points_balanced_by_episode(
+            metadata,
+            total_points,
+            args.max_points,
+            args.seed,
+        )
+    else:
+        selection = select_points(total_points, args.max_points, args.seed)
     color_keys = available_color_keys(metadata, args.color_key)
     if not color_keys:
         raise ValueError(
@@ -628,11 +1338,22 @@ def main():
                 projections_by_method["tsne"][label] = coords
 
     plot_paths = []
+    episode_labels = planning_episode_labels(planning_stats)
     for method, projections in projections_by_method.items():
         if not projections:
             continue
         for color_key in color_keys:
             values = color_values(metadata, color_key, selection)
+            episode_alphas = (
+                episode_step_alphas(
+                    metadata,
+                    selection,
+                    max_alpha=args.alpha,
+                    min_alpha=args.episode_min_alpha,
+                )
+                if color_key == "episode_idx"
+                else None
+            )
             path = output_dir / f"{method}_{color_key}.png"
             plot_projection_grid(
                 projections,
@@ -643,6 +1364,10 @@ def main():
                 point_size=args.point_size,
                 alpha=args.alpha,
                 explained_variance=pca_variance if method == "pca" else None,
+                episode_colors=args.episode_colors,
+                episode_alpha_values=episode_alphas,
+                episode_order=selected_episodes,
+                episode_labels=episode_labels,
             )
             plot_paths.append(str(path))
 
@@ -658,6 +1383,7 @@ def main():
         "dataset": args.dataset,
         "device": str(device),
         "num_clips": len(indices),
+        "selected_episodes": selected_episodes,
         "num_steps": int(prepared[0]["cfg"].data.dataset.num_steps),
         "plot_points": int(len(selection)),
         "standardized_latents": not args.no_standardize,
@@ -671,6 +1397,18 @@ def main():
         "color_keys": color_keys,
         "plots": plot_paths,
         "projection_csv": "projection_points.csv",
+        "planning_prioritization": {
+            "log_paths": [str(path) for path in planning_log_paths],
+            "model_filters": args.planning_model_filter,
+            "outcome": args.planning_outcome,
+            "default_goal_offset_steps": args.planning_default_goal_offset_steps,
+            "preferred_episodes": planning_preferred_episodes,
+            "selected_episode_stats": {
+                str(ep): planning_stats[int(ep)]
+                for ep in (selected_episodes or [])
+                if int(ep) in planning_stats
+            },
+        },
     }
     with (output_dir / "summary.json").open("w") as f:
         json.dump(summary, f, indent=2)

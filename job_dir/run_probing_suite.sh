@@ -15,7 +15,9 @@ if [[ -z "$PYTHON_BIN" ]]; then
 fi
 
 export STABLEWM_HOME="${STABLEWM_HOME:-$HOME/.stable_worldmodel}"
-PARALLEL_JOBS="${PARALLEL_JOBS:-5}"
+PARALLEL_JOBS="${PARALLEL_JOBS:-8}"
+CACHE_KEYS_RAW="${CACHE_KEYS:-action proprio force_torque tactile}"
+DRY_RUN=false
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 RESULTS_DIR="${RESULTS_DIR:-$ROOT_DIR/experiments/results/probing_suite_$TIMESTAMP}"
 RAW_RECORDS="$RESULTS_DIR/probing_runs.jsonl"
@@ -30,16 +32,24 @@ fi
 usage() {
   cat <<'EOF'
 Usage:
+  job_dir/run_probing_suite.sh [probe args...]
   job_dir/run_probing_suite.sh [models_root] [probe args...]
   job_dir/run_probing_suite.sh --models-root /path/to/group [probe args...]
 
 Behavior:
-  - discovers model subfolders under models_root
+  - by default runs the button-press, drawer-open, and bin-picking non-masked model preset
+  - with models_root, discovers model subfolders under models_root
   - picks the latest *_object.ckpt in each subfolder
   - runs linear, mlp, and knn probes by default
+  - uses 8 parallel jobs by default
+  - caches only action, proprio, force_torque, and tactile by default
   - writes JSON results, per-run logs, and a Markdown report
 
 Examples:
+  job_dir/run_probing_suite.sh --dry-run
+
+  job_dir/run_probing_suite.sh --device cuda
+
   job_dir/run_probing_suite.sh /home/disco/.stable_worldmodel/button_press \
     --dataset-name metaworld_button_press_probing
 
@@ -75,6 +85,30 @@ while (($#)); do
       PROBE_TYPES_RAW="$2"
       shift 2
       ;;
+    --keys-to-cache|--cache-keys)
+      CACHE_KEYS_RAW="$2"
+      shift 2
+      ;;
+    --dry-run)
+      DRY_RUN=true
+      shift
+      ;;
+    --config|--cache-dir|--dataset-name|--representation|--dropout|--knn-k|--knn-distance|--extract-batch-size|--probe-batch-size|--num-workers|--max-samples|--train-fraction|--val-fraction|--probe-step|--num-epochs|--lr|--weight-decay|--patience|--seed|--device)
+      if (($# < 2)); then
+        echo "Missing value for $1" >&2
+        exit 1
+      fi
+      EXTRA_ARGS+=("$1" "$2")
+      shift 2
+      ;;
+    --hidden-dims|--experiments)
+      EXTRA_ARGS+=("$1")
+      shift
+      while (($#)) && [[ "$1" != -* ]]; do
+        EXTRA_ARGS+=("$1")
+        shift
+      done
+      ;;
     --)
       shift
       EXTRA_ARGS+=("$@")
@@ -94,12 +128,6 @@ while (($#)); do
       ;;
   esac
 done
-
-if [[ -z "$MODELS_ROOT" ]]; then
-  echo "Missing models_root. Pass a folder path or use --models-root." >&2
-  usage >&2
-  exit 1
-fi
 
 mkdir -p "$RESULTS_DIR"
 : > "$RAW_RECORDS"
@@ -124,6 +152,17 @@ if ((${#PROBE_TYPES[@]} == 0)); then
   echo "No probe types selected." >&2
   exit 1
 fi
+
+mapfile -t CACHE_KEYS < <(
+  "$PYTHON_BIN" - <<'PY' "$CACHE_KEYS_RAW"
+import re
+import sys
+
+raw = sys.argv[1]
+for item in [part.strip() for part in re.split(r"[\s,]+", raw) if part.strip()]:
+    print(item)
+PY
+)
 
 discover_models() {
   "$PYTHON_BIN" - <<'PY' "$1"
@@ -176,22 +215,135 @@ for label, checkpoint in entries:
 PY
 }
 
-mapfile -t MODEL_ROWS < <(discover_models "$MODELS_ROOT")
+if [[ -z "$MODELS_ROOT" ]]; then
+  mapfile -t MODEL_ROWS < <(
+    "$PYTHON_BIN" - <<'PY' "$STABLEWM_HOME"
+from __future__ import annotations
+
+import re
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1]).expanduser().resolve()
+epoch_pattern = re.compile(r"_epoch_(\d+)_object\.ckpt$")
+
+
+def choose_checkpoint(directory: Path) -> Path | None:
+    candidates = [p for p in directory.rglob("*_object.ckpt") if p.is_file()]
+    if not candidates:
+        return None
+
+    def sort_key(path: Path):
+        match = epoch_pattern.search(path.name)
+        epoch = int(match.group(1)) if match else -1
+        return (epoch, path.stat().st_mtime_ns, path.name)
+
+    return max(candidates, key=sort_key)
+
+
+def resolve_model(candidates: list[str], search_roots: list[Path]) -> tuple[str, Path] | None:
+    for model_name in candidates:
+        for search_root in search_roots:
+            model_dir = search_root / model_name
+            if not model_dir.is_dir():
+                continue
+            checkpoint = choose_checkpoint(model_dir)
+            if checkpoint is not None:
+                return model_name, checkpoint
+    return None
+
+
+tasks = [
+    {
+        "task": "button_press",
+        "dataset": "metaworld_button_press_probing",
+        "search_roots": [root / "button_press", root],
+        "models": [
+            ["metaworld_coproj_button_press"],
+            [
+                "metaworld_selfattention_button_press_low_sigreg",
+                "metaworld_selfattention_button_press_5",
+                "metaworld_selfattention_button_press",
+            ],
+            ["metaworld_gated_button_press"],
+            ["metaworld_pixels_button_press", "metaworld_pixels_button_press_2"],
+        ],
+    },
+    {
+        "task": "drawer_open",
+        "dataset": "metaworld_drawer_open_probing",
+        "search_roots": [root / "drawer_open", root],
+        "models": [
+            ["metaworld_coproj_drawer_open"],
+            ["metaworld_selfattention_drawer_open", "metaworld_selfattention_drawer_open_low_sigreg"],
+            ["metaworld_gated_drawer_open"],
+            ["metaworld_pixels_drawer_open"],
+        ],
+    },
+    {
+        "task": "bin_picking",
+        "dataset": "metaworld_bin_picking_probing",
+        "search_roots": [root / "bin_picking", root],
+        "models": [
+            ["metaworld_coproj_bin_picking"],
+            ["metaworld_selfattention_bin_picking"],
+            ["metaworld_gated_bin_picking"],
+            ["metaworld_pixels_bin_picking"],
+        ],
+    },
+]
+
+missing: list[str] = []
+for spec in tasks:
+    for candidates in spec["models"]:
+        resolved = resolve_model(candidates, spec["search_roots"])
+        if resolved is None:
+            missing.append(f"{spec['task']}:{'|'.join(candidates)}")
+            continue
+        model_name, checkpoint = resolved
+        print(f"{model_name}\t{checkpoint}\t{spec['dataset']}")
+
+if missing:
+    print(
+        "Missing expected model(s): " + ", ".join(missing),
+        file=sys.stderr,
+    )
+
+PY
+  )
+else
+  mapfile -t MODEL_ROWS < <(discover_models "$MODELS_ROOT")
+fi
 
 if ((${#MODEL_ROWS[@]} == 0)); then
-  echo "No model checkpoints discovered under $MODELS_ROOT" >&2
+  echo "No model checkpoints discovered." >&2
   exit 1
 fi
 
 echo "Probing suite output directory: $RESULTS_DIR"
-echo "Models root: $MODELS_ROOT"
+if [[ -n "$MODELS_ROOT" ]]; then
+  echo "Models root: $MODELS_ROOT"
+else
+  echo "Models preset: button_press, drawer_open, bin_picking non-masked models"
+fi
 echo "Probe types: ${PROBE_TYPES[*]}"
 echo "Parallel jobs: $PARALLEL_JOBS"
+echo "Keys to cache: ${CACHE_KEYS[*]:-(none)}"
 echo "Discovered models:"
 for row in "${MODEL_ROWS[@]}"; do
-  IFS=$'\t' read -r model_label checkpoint <<< "$row"
-  echo "  - $model_label -> $checkpoint"
+  IFS=$'\t' read -r model_label checkpoint dataset_name <<< "$row"
+  if [[ -n "${dataset_name:-}" ]]; then
+    echo "  - $model_label [$dataset_name] -> $checkpoint"
+  else
+    echo "  - $model_label -> $checkpoint"
+  fi
 done
+
+if [[ "$DRY_RUN" == true ]]; then
+  echo ""
+  echo "Dry run only. No probe jobs launched."
+  exit 0
+fi
 
 append_record() {
   RECORD_PATH="$1" \
@@ -202,6 +354,7 @@ append_record() {
   RECORD_OUTPUT_LOG="$6" \
   RECORD_STATUS="$7" \
   RECORD_EXIT_CODE="$8" \
+  RECORD_DATASET_NAME="$9" \
   "$PYTHON_BIN" -c '
 import json
 import os
@@ -210,6 +363,7 @@ record = {
     "model_label": os.environ["RECORD_MODEL_LABEL"],
     "probe_type": os.environ["RECORD_PROBE_TYPE"],
     "checkpoint": os.environ["RECORD_CHECKPOINT"],
+    "dataset_name": os.environ["RECORD_DATASET_NAME"],
     "output_json": os.environ["RECORD_OUTPUT_JSON"],
     "output_log": os.environ["RECORD_OUTPUT_LOG"],
     "status": os.environ["RECORD_STATUS"],
@@ -221,7 +375,7 @@ with open(os.environ["RECORD_PATH"], "a", encoding="utf-8") as f:
 }
 
 render_report() {
-  "$PYTHON_BIN" - <<'PY' "$RAW_RECORDS" "$REPORT_MD" "$MODELS_ROOT" "${PROBE_TYPES[*]}"
+  "$PYTHON_BIN" - <<'PY' "$RAW_RECORDS" "$REPORT_MD" "${MODELS_ROOT:-preset}" "${PROBE_TYPES[*]}" "${CACHE_KEYS[*]}"
 from __future__ import annotations
 
 import json
@@ -234,6 +388,7 @@ raw_path = Path(sys.argv[1])
 report_path = Path(sys.argv[2])
 models_root = sys.argv[3]
 probe_types = [item for item in sys.argv[4].split() if item]
+cache_keys = [item for item in sys.argv[5].split() if item]
 
 records = []
 if raw_path.exists():
@@ -307,22 +462,24 @@ lines.append("# Probing Suite Report")
 lines.append("")
 lines.append(f"- Models root: `{models_root}`")
 lines.append(f"- Probe types: `{', '.join(probe_types)}`")
+lines.append(f"- Keys cached: `{', '.join(cache_keys) if cache_keys else '(none)'}`")
 lines.append(f"- Raw records: `{raw_path}`")
 lines.append("")
 
 lines.append("## Run Status")
 lines.append("")
-lines.append("| Model | Probe | Status | Exit | Checkpoint | JSON | Log |")
-lines.append("|---|---|---|---:|---|---|---|")
+lines.append("| Model | Dataset | Probe | Status | Exit | Checkpoint | JSON | Log |")
+lines.append("|---|---|---|---|---:|---|---|---|")
 for model in models:
     for probe_type in probe_types:
         entry = results_by_key.get((model, probe_type))
         if not entry:
-            lines.append(f"| {model} | {probe_type} | missing | n/a | n/a | n/a | n/a |")
+            lines.append(f"| {model} | n/a | {probe_type} | missing | n/a | n/a | n/a | n/a |")
             continue
         record = entry["record"]
         lines.append(
-            f"| {model} | {probe_type} | {record['status']} | {record['exit_code']} | "
+            f"| {model} | {record.get('dataset_name', '')} | {probe_type} | "
+            f"{record['status']} | {record['exit_code']} | "
             f"`{record['checkpoint']}` | `{record['output_json']}` | `{record['output_log']}` |"
         )
 lines.append("")
@@ -347,16 +504,27 @@ PY
 run_one() {
   local model_label="$1"
   local checkpoint="$2"
-  local probe_type="$3"
-  shift 3
+  local dataset_name="$3"
+  local probe_type="$4"
+  shift 4
   local output_json="$RESULTS_DIR/${model_label}_${probe_type}.json"
   local output_log="$RESULTS_DIR/${model_label}_${probe_type}.log"
+  local cache_args=()
+  if ((${#CACHE_KEYS[@]} > 0)); then
+    cache_args=(--keys-to-cache "${CACHE_KEYS[@]}")
+  fi
+  local dataset_args=()
+  if [[ -n "$dataset_name" ]]; then
+    dataset_args=(--dataset-name "$dataset_name")
+  fi
 
   echo "[$model_label][$probe_type] Starting probe run"
   "$ROOT_DIR/job_dir/run_probe_experiments.sh" \
     "$checkpoint" \
     "$probe_type" \
     --output "$output_json" \
+    "${dataset_args[@]}" \
+    "${cache_args[@]}" \
     "$@" >"$output_log" 2>&1
 }
 
@@ -365,6 +533,7 @@ declare -A PID_TO_PROBE=()
 declare -A PID_TO_CKPT=()
 declare -A PID_TO_JSON=()
 declare -A PID_TO_LOG=()
+declare -A PID_TO_DATASET=()
 
 reap_one() {
   local finished_pid=""
@@ -379,6 +548,7 @@ reap_one() {
   local checkpoint="${PID_TO_CKPT[$finished_pid]}"
   local output_json="${PID_TO_JSON[$finished_pid]}"
   local output_log="${PID_TO_LOG[$finished_pid]}"
+  local dataset_name="${PID_TO_DATASET[$finished_pid]}"
 
   local record_status="ok"
   if (( status != 0 )) || [[ ! -f "$output_json" ]]; then
@@ -393,13 +563,15 @@ reap_one() {
     "$output_json" \
     "$output_log" \
     "$record_status" \
-    "$status"
+    "$status" \
+    "$dataset_name"
 
   unset PID_TO_MODEL["$finished_pid"]
   unset PID_TO_PROBE["$finished_pid"]
   unset PID_TO_CKPT["$finished_pid"]
   unset PID_TO_JSON["$finished_pid"]
   unset PID_TO_LOG["$finished_pid"]
+  unset PID_TO_DATASET["$finished_pid"]
 
   return "$status"
 }
@@ -408,18 +580,19 @@ active_jobs=0
 failures=0
 
 for row in "${MODEL_ROWS[@]}"; do
-  IFS=$'\t' read -r model_label checkpoint <<< "$row"
+  IFS=$'\t' read -r model_label checkpoint dataset_name <<< "$row"
   for probe_type in "${PROBE_TYPES[@]}"; do
     output_json="$RESULTS_DIR/${model_label}_${probe_type}.json"
     output_log="$RESULTS_DIR/${model_label}_${probe_type}.log"
 
-    run_one "$model_label" "$checkpoint" "$probe_type" "${EXTRA_ARGS[@]}" &
+    run_one "$model_label" "$checkpoint" "${dataset_name:-}" "$probe_type" "${EXTRA_ARGS[@]}" &
     pid=$!
     PID_TO_MODEL["$pid"]="$model_label"
     PID_TO_PROBE["$pid"]="$probe_type"
     PID_TO_CKPT["$pid"]="$checkpoint"
     PID_TO_JSON["$pid"]="$output_json"
     PID_TO_LOG["$pid"]="$output_log"
+    PID_TO_DATASET["$pid"]="${dataset_name:-}"
     ((active_jobs+=1))
 
     if (( active_jobs >= PARALLEL_JOBS )); then
@@ -427,7 +600,7 @@ for row in "${MODEL_ROWS[@]}"; do
       reap_one
       status=$?
       set -e
-      ((active_jobs-=1))
+      active_jobs=$((active_jobs - 1))
       if (( status != 0 )); then
         ((failures+=1))
       fi
@@ -440,7 +613,7 @@ while (( active_jobs > 0 )); do
   reap_one
   status=$?
   set -e
-  ((active_jobs-=1))
+  active_jobs=$((active_jobs - 1))
   if (( status != 0 )); then
     ((failures+=1))
   fi

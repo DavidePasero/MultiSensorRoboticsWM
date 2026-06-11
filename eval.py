@@ -1,6 +1,7 @@
 import os
 import json
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
+from copy import deepcopy
 
 os.environ.setdefault("MUJOCO_GL", "egl")
 os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
@@ -337,6 +338,330 @@ class DatasetColumnFilter:
         return chunks
 
 
+def _to_numpy(value):
+    if torch.is_tensor(value):
+        return value.detach().cpu().numpy()
+    return np.asarray(value)
+
+
+def _find_stacked_wrapper(env):
+    current = env
+    seen = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if current.__class__.__name__ == "StackedWrapper" and hasattr(
+            current, "buffers"
+        ):
+            return current
+        current = getattr(current, "env", None)
+    return None
+
+
+def _set_stacked_history_buffers(world, init_history):
+    """Synchronize StableWM's internal frame-stack buffers with dataset history."""
+    for env_idx, env in enumerate(world.envs.unwrapped.envs):
+        stacked = _find_stacked_wrapper(env)
+        if stacked is None:
+            continue
+
+        for key, values in init_history.items():
+            if key not in stacked.buffers:
+                continue
+            buffer = stacked.buffers[key]
+            buffer.clear()
+            for value in values[env_idx]:
+                buffer.append(deepcopy(value))
+
+
+def _build_action_history(values, history_size):
+    """Build live-env-style action history ending before the planning action."""
+    if torch.is_tensor(values):
+        action_history = values[:history_size].clone()
+        action_history[0] = values[0]
+        if history_size > 1:
+            action_history[1:] = values[: history_size - 1]
+        return action_history
+
+    values = np.asarray(values)
+    action_history = values[:history_size].copy()
+    action_history[0] = values[0]
+    if history_size > 1:
+        action_history[1:] = values[: history_size - 1]
+    return action_history
+
+
+def evaluate_from_dataset_with_history(
+    world,
+    dataset,
+    episodes_idx,
+    start_steps,
+    goal_offset_steps,
+    eval_budget,
+    callables=None,
+    save_video=True,
+    video_path="./",
+):
+    """Evaluate from dataset starts while preserving a true observation history.
+
+    StableWM's built-in evaluate_from_dataset repeats the planning start frame
+    across the history dimension. That is fine for history_size=1, but it
+    creates a training/evaluation mismatch for LeMuMoWM checkpoints trained with
+    a multi-step context. This variant loads the H-1 rows before each planning
+    start and initializes both world.infos and the internal StackedWrapper
+    buffers with those dataset histories.
+    """
+    history_size = int(getattr(world, "_history_size", 1))
+    if history_size <= 1:
+        print("Using default dataset evaluation with history_size=1.")
+        return world.evaluate_from_dataset(
+            dataset,
+            start_steps=start_steps,
+            goal_offset_steps=goal_offset_steps,
+            eval_budget=eval_budget,
+            episodes_idx=episodes_idx,
+            callables=callables,
+            save_video=save_video,
+            video_path=video_path,
+        )
+
+    if (
+        world.envs.envs[0].spec.max_episode_steps is not None
+        and world.envs.envs[0].spec.max_episode_steps < goal_offset_steps
+    ):
+        raise AssertionError("env max_episode_steps must be greater than eval_budget")
+
+    ep_idx_arr = np.asarray(episodes_idx)
+    start_steps_arr = np.asarray(start_steps)
+    end_steps = start_steps_arr + goal_offset_steps
+    history_starts = start_steps_arr - (history_size - 1)
+
+    if len(ep_idx_arr) != len(start_steps_arr):
+        raise ValueError("episodes_idx and start_steps must have the same length")
+    if len(ep_idx_arr) != world.num_envs:
+        raise ValueError("Number of episodes to evaluate must match number of envs")
+    if np.any(history_starts < 0):
+        bad = np.nonzero(history_starts < 0)[0].tolist()
+        raise ValueError(
+            "Cannot build the requested evaluation history because some planning "
+            f"starts have fewer than {history_size - 1} previous steps: {bad}."
+        )
+    print(
+        "Using history-aware dataset evaluation with "
+        f"history_size={history_size}; planning starts "
+        f"{int(start_steps_arr.min())}..{int(start_steps_arr.max())}, "
+        f"history starts {int(history_starts.min())}..{int(history_starts.max())}."
+    )
+
+    data = dataset.load_chunk(ep_idx_arr, history_starts, end_steps)
+    columns = dataset.column_names
+
+    init_history_per_env = defaultdict(list)
+    current_step_per_env = defaultdict(list)
+    goal_step_per_env = defaultdict(list)
+    target_frame_chunks = []
+
+    for ep in data:
+        for col in columns:
+            if col.startswith("goal") or col not in ep:
+                continue
+            if col.startswith("pixels"):
+                ep[col] = ep[col].permute(0, 2, 3, 1)
+
+            if not isinstance(ep[col], (torch.Tensor, np.ndarray)):
+                continue
+            if len(ep[col]) < history_size:
+                raise ValueError(
+                    f"Loaded chunk for column {col!r} is shorter than "
+                    f"history_size={history_size}."
+                )
+
+            if col == "action":
+                init_data = _build_action_history(ep[col], history_size)
+            else:
+                init_data = ep[col][:history_size]
+
+            current_data = ep[col][history_size - 1]
+            goal_data = ep[col][-1]
+
+            init_history_per_env[col].append(_to_numpy(init_data))
+            current_step_per_env[col].append(_to_numpy(current_data))
+            goal_step_per_env[col].append(_to_numpy(goal_data))
+
+        if "pixels" in ep:
+            target_frame_chunks.append(_to_numpy(ep["pixels"][history_size - 1 :]))
+
+    init_history = {
+        key: np.stack(value) for key, value in deepcopy(init_history_per_env).items()
+    }
+    current_step = {
+        key: np.stack(value) for key, value in deepcopy(current_step_per_env).items()
+    }
+
+    goal_step_single = {}
+    for key, value in goal_step_per_env.items():
+        goal_key = "goal" if key == "pixels" else f"goal_{key}"
+        goal_step_single[goal_key] = np.stack(value)
+
+    seeds = current_step.get("seed")
+    variation_prefix = "variation."
+    variations_dict = {
+        key.removeprefix(variation_prefix): value
+        for key, value in current_step.items()
+        if key.startswith(variation_prefix)
+    }
+
+    options = [{} for _ in range(world.num_envs)]
+    if variations_dict:
+        for idx in range(world.num_envs):
+            options[idx]["variation"] = list(variations_dict.keys())
+            options[idx]["variation_values"] = {
+                key: value[idx] for key, value in variations_dict.items()
+            }
+
+    callable_data = deepcopy(current_step)
+    callable_data.update(deepcopy(goal_step_single))
+    world.reset(seed=seeds, options=options)
+
+    callables = callables or []
+    for env_idx, env in enumerate(world.envs.unwrapped.envs):
+        env_unwrapped = env.unwrapped
+        for spec in callables:
+            method_name = spec["method"]
+            if not hasattr(env_unwrapped, method_name):
+                print(
+                    f"Env {env_unwrapped} has no method {method_name}, "
+                    "skipping callable."
+                )
+                continue
+
+            method = getattr(env_unwrapped, method_name)
+            args = spec.get("args", spec)
+            prepared_args = {}
+            for args_name, args_data in args.items():
+                value = args_data.get("value", None)
+                is_in_dataset = args_data.get("in_dataset", True)
+                if is_in_dataset:
+                    if value not in callable_data:
+                        print(
+                            f"Col {value} not found in dataset, skipping callable "
+                            f"for env {env_unwrapped}."
+                        )
+                        continue
+                    prepared_args[args_name] = deepcopy(callable_data[value][env_idx])
+                else:
+                    prepared_args[args_name] = args_data.get("value")
+            method(**prepared_args)
+
+    shape_prefix = world.infos["pixels"].shape[:2]
+    if shape_prefix[1] != history_size:
+        raise RuntimeError(
+            "StableWM wrapper did not initialize the requested history size. "
+            f"Expected {history_size}, got {shape_prefix[1]}."
+        )
+    goal_step = {
+        key: np.broadcast_to(value[:, None, ...], shape_prefix + value.shape[1:])
+        for key, value in goal_step_single.items()
+    }
+
+    world.infos.update(deepcopy(init_history))
+    world.infos.update(deepcopy(goal_step))
+    _set_stacked_history_buffers(world, init_history)
+
+    if "goal" in goal_step and "goal" in world.infos:
+        assert np.allclose(world.infos["goal"], goal_step["goal"]), (
+            "Goal info does not match"
+        )
+
+    results = {
+        "success_rate": 0.0,
+        "episode_successes": np.zeros(len(episodes_idx)),
+        "seeds": seeds,
+    }
+
+    if target_frame_chunks:
+        target_frames = np.stack(target_frame_chunks)
+    else:
+        target_frames = None
+
+    video_frames = np.empty(
+        (world.num_envs, eval_budget, *world.infos["pixels"].shape[-3:]),
+        dtype=np.uint8,
+    )
+    frozen_infos = {}
+    frozen_mask = np.zeros(world.num_envs, dtype=bool)
+
+    for step_idx in range(eval_budget):
+        video_frames[:, step_idx] = world.infos["pixels"][:, -1]
+        world.infos.update(deepcopy(goal_step))
+        world.step()
+        current_successes = np.logical_or(
+            results["episode_successes"], world.terminateds
+        )
+        newly_solved = np.logical_and(~frozen_mask, current_successes)
+        if np.any(newly_solved):
+            for key, value in world.infos.items():
+                if isinstance(value, np.ndarray):
+                    cache = frozen_infos.get(key)
+                    if cache is None:
+                        cache = np.empty_like(value)
+                        frozen_infos[key] = cache
+                    cache[newly_solved] = value[newly_solved]
+            frozen_mask[newly_solved] = True
+
+        if np.any(frozen_mask):
+            for key, cache in frozen_infos.items():
+                world.infos[key][frozen_mask] = cache[frozen_mask]
+
+        results["episode_successes"] = current_successes
+        world.envs.unwrapped._autoreset_envs = np.zeros((world.num_envs,))
+        if np.all(results["episode_successes"]):
+            if step_idx + 1 < eval_budget:
+                last_frame = world.infos["pixels"][:, -1]
+                remaining = eval_budget - (step_idx + 1)
+                video_frames[:, step_idx + 1 :] = np.broadcast_to(
+                    last_frame[:, None, ...],
+                    (world.num_envs, remaining, *last_frame.shape[1:]),
+                )
+            break
+
+    video_frames[:, -1] = world.infos["pixels"][:, -1]
+    world.infos.update(deepcopy(goal_step))
+
+    n_episodes = len(episodes_idx)
+    results["success_rate"] = (
+        float(np.sum(results["episode_successes"])) / n_episodes * 100.0
+    )
+
+    if save_video and target_frames is not None:
+        import imageio
+
+        target_len = target_frames.shape[1]
+        video_path_obj = Path(video_path)
+        video_path_obj.mkdir(parents=True, exist_ok=True)
+        for env_idx in range(world.num_envs):
+            out = imageio.get_writer(
+                video_path_obj / f"rollout_{env_idx}.mp4",
+                fps=15,
+                codec="libx264",
+            )
+            goals = np.vstack([target_frames[env_idx, -1], target_frames[env_idx, -1]])
+            for t in range(eval_budget):
+                stacked_frame = np.vstack(
+                    [video_frames[env_idx, t], target_frames[env_idx, t % target_len]]
+                )
+                frame = np.hstack([stacked_frame, goals])
+                out.append_data(frame)
+            out.close()
+        print(f"Video saved to {video_path_obj}")
+
+    if results["seeds"] is not None:
+        assert np.unique(results["seeds"]).shape[0] == n_episodes, (
+            "Some episode seeds are identical!"
+        )
+
+    return results
+
+
 def sample_fixed_offset_rows(dataset, ep_indices, cfg, eval_env_idx, goal_offset_steps):
     col_name = "episode_idx" if "episode_idx" in dataset.column_names else "ep_idx"
     episode_idx = np.asarray(dataset.get_col_data(col_name)).reshape(-1)
@@ -670,7 +995,8 @@ def run(cfg: DictConfig):
 
     try:
         start_time = time.time()
-        metrics = world.evaluate_from_dataset(
+        metrics = evaluate_from_dataset_with_history(
+            world,
             dataset_for_eval,
             start_steps=eval_start_idx.tolist(),
             goal_offset_steps=eval_goal_offset_steps,
@@ -679,6 +1005,7 @@ def run(cfg: DictConfig):
             callables=OmegaConf.to_container(
                 cfg.eval.get("callables"), resolve=True
             ),
+            save_video=bool(cfg.eval.get("save_video", True)),
             video_path=results_path,
         )
         if cfg.get("policy", "random") != "random":

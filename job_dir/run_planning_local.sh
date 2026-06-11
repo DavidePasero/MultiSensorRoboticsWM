@@ -1,22 +1,35 @@
 #!/usr/bin/env bash
+set -euo pipefail
 
 source .venv/bin/activate
 
-MODEL_RUN="${MODEL_RUN:-bin_picking/metaworld_coproj_bin_picking}"
-DATASET_NAME="${DATASET_NAME:-metaworld_eval_bin_picking}"
-OUTPUT_FILENAME="${OUTPUT_FILENAME:-documentation/planning_results_bin_picking_masked/planning_results_${MODEL_RUN}.txt}"
+MODEL_RUN="${MODEL_RUN:-button_press/metaworld_selfattention_button_press_5}"
+DATASET_NAME="${DATASET_NAME:-metaworld_eval_button_press}"
+MODEL_SLUG="${MODEL_RUN//\//__}"
+OUTPUT_FILENAME="${OUTPUT_FILENAME:-planning_results_${MODEL_SLUG}.txt}"
+WORLD_HISTORY_SIZE="${WORLD_HISTORY_SIZE:-3}"
+EVAL_NUM="${EVAL_NUM:-10}"
+GOAL_OFFSET_STEPS="${GOAL_OFFSET_STEPS:-20}"
+EVAL_BUDGET="${EVAL_BUDGET:-50}"
+HORIZON="${HORIZON:-20}"
+RECEDING_HORIZON="${RECEDING_HORIZON:-5}"
+ACTION_BLOCK="${ACTION_BLOCK:-1}"
+SOLVER_VAR_SCALE="${SOLVER_VAR_SCALE:-0.3}"
+CEM_NUM_SAMPLES="${CEM_NUM_SAMPLES:-300}"
+CEM_TOPK="${CEM_TOPK:-30}"
+CEM_STEPS="${CEM_STEPS:-30}"
+SAVE_VIDEO="${SAVE_VIDEO:-true}"
 
-TASKS=(
-  "bin-picking-v3" \
-)
-
-SEEDS=(42 43 44)
+TASK_LIST="${TASK_LIST:-button-press-v3}"
+SEED_LIST="${SEED_LIST:-42 43 44}"
+read -r -a TASKS <<< "$TASK_LIST"
+read -r -a SEEDS <<< "$SEED_LIST"
 
 BLUR="${BLUR:-false}"
 BLUR_PROBABILITY="${BLUR_PROBABILITY:-1.0}"
-BLUR_KERNEL_SIZE="${BLUR_KERNEL_SIZE:-5}"
-BLUR_SIGMA_MIN="${BLUR_SIGMA_MIN:-0.5}"
-BLUR_SIGMA_MAX="${BLUR_SIGMA_MAX:-2.0}"
+BLUR_KERNEL_SIZE="${BLUR_KERNEL_SIZE:-19}"
+BLUR_SIGMA_MIN="${BLUR_SIGMA_MIN:-3.0}"
+BLUR_SIGMA_MAX="${BLUR_SIGMA_MAX:-3.0}"
 
 ALL_MODALITIES=(
   "pixels"
@@ -29,7 +42,7 @@ ALL_MODALITIES=(
 # Leave empty to keep every modality. Otherwise, list the modalities the model
 # should receive; every other modality is dropped so the imputer has to fill it.
 KEEP_MODALITIES=(
-  "pixels"
+
 )
 
 contains_modality() {
@@ -83,27 +96,33 @@ fi
 
 for task in "${TASKS[@]}"; do
   for seed in "${SEEDS[@]}"; do
-    eval_num=10
-    goal_offset_steps=20
-    eval_budget=50
-    horizon=25
-    receding_horizon=5
-    action_block=1
-
-    python eval.py \
+    CMD=(
+      python eval.py
       --config-name=metaworld \
       "policy=$MODEL_RUN" \
       "eval.dataset_name=$DATASET_NAME" \
       "world.metaworld_env_name=$task" \
+      "world.history_size=$WORLD_HISTORY_SIZE" \
       "seed=$seed" \
-      "eval.num_eval=$eval_num" \
-      "eval.goal_offset_steps=$goal_offset_steps" \
-      "eval.eval_budget=$eval_budget" \
-      "plan_config.horizon=$horizon" \
-      "plan_config.receding_horizon=$receding_horizon" \
-      "plan_config.action_block=$action_block" \
+      "eval.num_eval=$EVAL_NUM" \
+      "eval.goal_offset_steps=$GOAL_OFFSET_STEPS" \
+      "eval.eval_budget=$EVAL_BUDGET" \
+      "plan_config.horizon=$HORIZON" \
+      "plan_config.receding_horizon=$RECEDING_HORIZON" \
+      "plan_config.action_block=$ACTION_BLOCK" \
+      "+plan_config.warm_start=false" \
+      "solver.var_scale=$SOLVER_VAR_SCALE" \
+      "solver.num_samples=$CEM_NUM_SAMPLES" \
+      "solver.topk=$CEM_TOPK" \
+      "solver.n_steps=$CEM_STEPS" \
+      "+eval.save_video=$SAVE_VIDEO" \
       "${DROP_MODALITIES_OVERRIDE[@]}" \
       "${BLUR_OVERRIDES[@]}" \
       "output.filename=$OUTPUT_FILENAME"
+    )
+    printf 'Running command:'
+    printf ' %q' "${CMD[@]}"
+    printf '\n'
+    "${CMD[@]}"
   done
 done
