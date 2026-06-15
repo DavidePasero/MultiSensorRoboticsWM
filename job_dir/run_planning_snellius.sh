@@ -35,6 +35,76 @@ if [[ ! -f eval.py ]]; then
 fi
 source .venv/bin/activate
 
+check_model_run_exists() {
+  if [[ "$MODEL_RUN" == "random" ]]; then
+    return
+  fi
+
+  local model_dir="$STABLEWM_HOME/$MODEL_RUN"
+  if [[ "$MODEL_RUN" == */* && ! -d "$model_dir" ]]; then
+    model_dir="$STABLEWM_HOME/${MODEL_RUN%%/*}"
+  fi
+
+  if [[ -f "${model_dir}_object.ckpt" ]]; then
+    if [[ "$MODEL_RUN" =~ _epoch_([0-9]+)$ && "${BASH_REMATCH[1]}" != "$CHECKPOINT_EPOCH" ]]; then
+      echo "Explicit MODEL_RUN=$MODEL_RUN uses epoch ${BASH_REMATCH[1]}, but CHECKPOINT_EPOCH=$CHECKPOINT_EPOCH." >&2
+      exit 1
+    fi
+    echo "Using explicit checkpoint: ${model_dir}_object.ckpt"
+    return
+  fi
+
+  if [[ ! -d "$model_dir" ]]; then
+    echo "Checkpoint directory not found for MODEL_RUN=$MODEL_RUN" >&2
+    echo "Checked: $model_dir" >&2
+    echo "Available matching directories in $STABLEWM_HOME:" >&2
+    find "$STABLEWM_HOME" -maxdepth 1 -type d -name 'metaworld_*' -printf '  %f\n' | sort >&2
+    exit 1
+  fi
+
+  if [[ ! -f "$model_dir/config.yaml" ]]; then
+    echo "Missing config.yaml in checkpoint directory: $model_dir" >&2
+    exit 1
+  fi
+
+  if ! find "$model_dir" -maxdepth 1 -type f \( -name '*_weights.ckpt' -o -name '*_epoch_*_object.ckpt' \) | grep -q .; then
+    echo "No checkpoint files found in: $model_dir" >&2
+    echo "Expected '*_weights.ckpt' or '*_epoch_*_object.ckpt'." >&2
+    exit 1
+  fi
+
+  local object_ckpt
+  object_ckpt="$(
+    find "$model_dir" -maxdepth 1 -type f -name "*_epoch_${CHECKPOINT_EPOCH}_object.ckpt" \
+      | sort -V \
+      | tail -n 1
+  )"
+  if [[ -z "$object_ckpt" ]]; then
+    echo "No epoch ${CHECKPOINT_EPOCH} object checkpoint found in: $model_dir" >&2
+    echo "The planning API loads serialized object checkpoints, not weights-only checkpoints." >&2
+    echo "Available object checkpoints:" >&2
+    find "$model_dir" -maxdepth 1 -type f -name '*_epoch_*_object.ckpt' -printf '  %f\n' | sort -V >&2
+    exit 1
+  fi
+
+  MODEL_RUN="${object_ckpt#$STABLEWM_HOME/}"
+  MODEL_RUN="${MODEL_RUN%_object.ckpt}"
+  echo "Resolved MODEL_RUN to epoch ${CHECKPOINT_EPOCH} object checkpoint: $MODEL_RUN"
+}
+
+check_dataset_exists() {
+  local dataset_path="$STABLEWM_HOME/${DATASET_NAME}.h5"
+  if [[ -f "$dataset_path" ]]; then
+    return
+  fi
+
+  echo "Dataset file not found for DATASET_NAME=$DATASET_NAME" >&2
+  echo "Checked: $dataset_path" >&2
+  echo "Available .h5 files in $STABLEWM_HOME:" >&2
+  find "$STABLEWM_HOME" -maxdepth 1 -type f -name '*.h5' -printf '  %f\n' | sort >&2
+  exit 1
+}
+
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-manual_planning}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$STABLEWM_HOME/documentation/planning_corrected_eval70}"
 OUTPUT_DIR_EXPLICIT="${OUTPUT_DIR+x}"
@@ -58,6 +128,7 @@ SOLVER_VAR_SCALE="${SOLVER_VAR_SCALE:-0.3}"
 CEM_NUM_SAMPLES="${CEM_NUM_SAMPLES:-300}"
 CEM_TOPK="${CEM_TOPK:-30}"
 CEM_STEPS="${CEM_STEPS:-30}"
+CHECKPOINT_EPOCH="${CHECKPOINT_EPOCH:-10}"
 
 CACHE_ALL_LOADED="${CACHE_ALL_LOADED:-true}"
 SAVE_VIDEO="${SAVE_VIDEO:-true}"
@@ -117,6 +188,9 @@ if [[ -n "${PLANNING_MANIFEST:-}" ]]; then
 
   echo "Loaded planning manifest entry $SLURM_ARRAY_TASK_ID from $PLANNING_MANIFEST"
 fi
+
+check_model_run_exists
+check_dataset_exists
 
 mkdir -p "$OUTPUT_DIR"
 
@@ -206,6 +280,7 @@ echo "DATASET_NAME=$DATASET_NAME"
 echo "TASK_LIST=$TASK_LIST"
 echo "SEED_LIST=$SEED_LIST"
 echo "OUTPUT_DIR=$OUTPUT_DIR"
+echo "CHECKPOINT_EPOCH=$CHECKPOINT_EPOCH"
 echo "EVAL_BUDGET=$EVAL_BUDGET"
 echo "HORIZON=$HORIZON"
 echo "RECEDING_HORIZON=$RECEDING_HORIZON"

@@ -18,6 +18,7 @@ MAX_ARRAY_PARALLEL="${MAX_ARRAY_PARALLEL:-8}"
 SEED_LIST="${SEED_LIST:-42 43 44}"
 
 COMMON_EVAL_NUM="${EVAL_NUM:-10}"
+COMMON_CHECKPOINT_EPOCH="${CHECKPOINT_EPOCH:-10}"
 COMMON_EVAL_BUDGET="${EVAL_BUDGET:-70}"
 COMMON_GOAL_OFFSET_STEPS="${GOAL_OFFSET_STEPS:-20}"
 COMMON_HORIZON="${HORIZON:-15}"
@@ -63,6 +64,7 @@ echo "Manifest: $MANIFEST"
 echo "Slurm log dir: $SLURM_LOG_DIR"
 echo "Seeds: $SEED_LIST"
 echo "Eval episodes per seed: $COMMON_EVAL_NUM"
+echo "Checkpoint epoch: $COMMON_CHECKPOINT_EPOCH"
 echo "Eval budget: $COMMON_EVAL_BUDGET"
 echo "Warm start: $COMMON_WARM_START"
 echo "Action clamping: $COMMON_CLAMP_ACTION_CANDIDATES"
@@ -74,25 +76,25 @@ echo ""
 # ---------------------------------------------------------------------------
 add_planning \
   "normal_button_press_pixels" \
-  "button_press/metaworld_pixels_button_press_2" \
+  "metaworld_pixels_button_press_2" \
   "metaworld_eval_button_press" \
   "button-press-v3"
 
 add_planning \
   "normal_button_press_selfattention" \
-  "button_press/metaworld_selfattention_button_press_low_sigreg" \
+  "metaworld_selfattention_button_press_5" \
   "metaworld_eval_button_press" \
   "button-press-v3"
 
 add_planning \
   "normal_button_press_gated" \
-  "button_press/metaworld_gated_button_press" \
+  "metaworld_gated_button_press" \
   "metaworld_eval_button_press" \
   "button-press-v3"
 
 add_planning \
   "normal_button_press_coproj" \
-  "button_press/metaworld_coproj_button_press" \
+  "metaworld_coproj_button_press" \
   "metaworld_eval_button_press" \
   "button-press-v3"
 
@@ -104,25 +106,25 @@ add_planning \
 
 add_planning \
   "normal_drawer_open_pixels" \
-  "drawer_open/metaworld_pixels_drawer_open" \
+  "metaworld_pixels_drawer_open" \
   "metaworld_eval_drawer_open" \
   "drawer-open-v3"
 
 add_planning \
   "normal_drawer_open_selfattention" \
-  "drawer_open/metaworld_selfattention_drawer_open_low_sigreg" \
+  "metaworld_selfattention_drawer_open_high_sigreg" \
   "metaworld_eval_drawer_open" \
   "drawer-open-v3"
 
 add_planning \
   "normal_drawer_open_gated" \
-  "drawer_open/metaworld_gated_drawer_open" \
+  "metaworld_gated_drawer_open" \
   "metaworld_eval_drawer_open" \
   "drawer-open-v3"
 
 add_planning \
   "normal_drawer_open_coproj" \
-  "drawer_open/metaworld_coproj_drawer_open" \
+  "metaworld_coproj_drawer_open" \
   "metaworld_eval_drawer_open" \
   "drawer-open-v3"
 
@@ -138,7 +140,7 @@ add_planning \
 # ---------------------------------------------------------------------------
 add_planning \
   "missing_button_press_only_pixels_selfmask" \
-  "button_press/metaworld_selfattention_selfmask_button_press" \
+  "metaworld_selfattention_selfmask_button_press" \
   "metaworld_eval_button_press" \
   "button-press-v3" \
   "pixels" \
@@ -146,7 +148,7 @@ add_planning \
 
 add_planning \
   "missing_button_press_only_pixels_missing_token" \
-  "button_press/metaworld_selfattention_masked_button_press" \
+  "metaworld_selfattention_masked_button_press" \
   "metaworld_eval_button_press" \
   "button-press-v3" \
   "pixels" \
@@ -154,7 +156,7 @@ add_planning \
 
 add_planning \
   "missing_button_press_only_pixels_latent_reconstruction" \
-  "button_press/metaworld_selfattention_latent_reconstruction_button_press" \
+  "metaworld_selfattention_latent_reconstruction_button_press" \
   "metaworld_eval_button_press" \
   "button-press-v3" \
   "pixels" \
@@ -162,7 +164,7 @@ add_planning \
 
 add_planning \
   "missing_button_press_only_pixels_pixels_baseline" \
-  "button_press/metaworld_pixels_button_press_2" \
+  "metaworld_pixels_button_press_2" \
   "metaworld_eval_button_press" \
   "button-press-v3" \
   "all" \
@@ -182,7 +184,7 @@ do
 
   add_planning \
     "blur_button_press_${blur_name}_latent_reconstruction" \
-    "blur/metaworld_selfattention_latent_reconstruction_blur_button_press" \
+    "metaworld_selfattention_latent_reconstruction_blur_button_press" \
     "metaworld_eval_button_press" \
     "button-press-v3" \
     "$BLUR_KEEP_MODALITIES" \
@@ -193,7 +195,7 @@ do
 
   add_planning \
     "blur_button_press_${blur_name}_missing_token" \
-    "blur/metaworld_selfattention_masked_button_press_5_blur" \
+    "metaworld_selfattention_masked_button_press_5_blur" \
     "metaworld_eval_button_press" \
     "button-press-v3" \
     "$BLUR_KEEP_MODALITIES" \
@@ -204,7 +206,7 @@ do
 
   add_planning \
     "blur_button_press_${blur_name}_selfmask" \
-    "blur/metaworld_selfattention_selfmask_blur_button_press" \
+    "metaworld_selfattention_selfmask_blur_button_press" \
     "metaworld_eval_button_press" \
     "button-press-v3" \
     "$BLUR_KEEP_MODALITIES" \
@@ -232,6 +234,7 @@ export PLANNING_MANIFEST="$MANIFEST"
 export OUTPUT_ROOT
 export SEED_LIST
 export EVAL_NUM="$COMMON_EVAL_NUM"
+export CHECKPOINT_EPOCH="$COMMON_CHECKPOINT_EPOCH"
 export EVAL_BUDGET="$COMMON_EVAL_BUDGET"
 export GOAL_OFFSET_STEPS="$COMMON_GOAL_OFFSET_STEPS"
 export HORIZON="$COMMON_HORIZON"
@@ -279,6 +282,7 @@ manifest: $MANIFEST
 slurm_log_pattern: $SLURM_LOG_DIR/${JOB_NAME}_${JOB_ID}_<array_task_id>.out
 seeds: $SEED_LIST
 eval_num_per_seed: $COMMON_EVAL_NUM
+checkpoint_epoch: $COMMON_CHECKPOINT_EPOCH
 eval_budget: $COMMON_EVAL_BUDGET
 warm_start: $COMMON_WARM_START
 action_clamping: $COMMON_CLAMP_ACTION_CANDIDATES
