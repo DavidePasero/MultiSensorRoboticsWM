@@ -31,6 +31,11 @@ def model_supports_missing_modalities(model):
     return bool(getattr(fusion, "supports_missing_modalities", False))
 
 
+def model_uses_obs_encoder(model):
+    encoder = getattr(model, "encoder", None)
+    return bool(getattr(encoder, "is_obs_encoder", False))
+
+
 def get_model_modality_sources(model):
     encoder = getattr(model, "encoder", None)
     encoders = getattr(encoder, "encoders", None)
@@ -76,6 +81,23 @@ def get_drop_modalities(eval_cfg):
     return drop_modalities
 
 
+def get_modality_substitution(eval_cfg):
+    method = str(eval_cfg.get("modality_substitution", "impute")).strip().lower()
+    aliases = {
+        "drop": "impute",
+        "missing": "impute",
+        "mask": "impute",
+        "zeros": "zero",
+    }
+    method = aliases.get(method, method)
+    if method not in {"impute", "zero"}:
+        raise ValueError(
+            "eval.modality_substitution must be one of: impute, zero "
+            f"(got {method!r})."
+        )
+    return method
+
+
 def _make_json_safe(value):
     if isinstance(value, dict):
         return {k: _make_json_safe(v) for k, v in value.items()}
@@ -107,6 +129,385 @@ class EvalGaussianBlur:
         return blurred.squeeze(0)
 
 
+class ActionRegularizedCostModel(torch.nn.Module):
+    """Add action priors to planning cost without changing model training."""
+
+    def __init__(
+        self,
+        model,
+        *,
+        action_processor=None,
+        action_norm_weight=0.0,
+        action_delta_weight=0.0,
+        first_action_delta_weight=0.0,
+    ):
+        super().__init__()
+        self.model = model
+        self.action_processor = action_processor
+        self.action_norm_weight = float(action_norm_weight)
+        self.action_delta_weight = float(action_delta_weight)
+        self.first_action_delta_weight = float(first_action_delta_weight)
+
+    @property
+    def encoder(self):
+        return self.model.encoder
+
+    def encode(self, *args, **kwargs):
+        return self.model.encode(*args, **kwargs)
+
+    def predict(self, *args, **kwargs):
+        return self.model.predict(*args, **kwargs)
+
+    def rollout(self, *args, **kwargs):
+        return self.model.rollout(*args, **kwargs)
+
+    def criterion(self, *args, **kwargs):
+        return self.model.criterion(*args, **kwargs)
+
+    def _action_stats(self, actions):
+        if self.action_processor is None:
+            return None
+        mean = getattr(self.action_processor, "mean_", None)
+        scale = getattr(self.action_processor, "scale_", None)
+        if mean is None or scale is None:
+            return None
+
+        action_dim = actions.size(-1)
+        mean = torch.as_tensor(mean, dtype=actions.dtype, device=actions.device)
+        scale = torch.as_tensor(scale, dtype=actions.dtype, device=actions.device)
+        if mean.numel() != action_dim:
+            if action_dim % mean.numel() != 0:
+                return None
+            repeat = action_dim // mean.numel()
+            mean = mean.repeat(repeat)
+            scale = scale.repeat(repeat)
+
+        view_shape = [1] * actions.ndim
+        view_shape[-1] = action_dim
+        return mean.view(*view_shape), scale.view(*view_shape)
+
+    def _to_env_action_units(self, actions):
+        stats = self._action_stats(actions)
+        if stats is None:
+            return actions
+        mean, scale = stats
+        return actions * scale + mean
+
+    def _last_history_action(self, history, num_samples, device):
+        if not torch.is_tensor(history):
+            return None
+        history = history.to(device)
+
+        if history.ndim == 4:
+            last_action = history[..., -1, :]
+        elif history.ndim == 3:
+            last_action = history[:, -1, :].unsqueeze(1)
+            last_action = last_action.expand(-1, num_samples, -1)
+        elif history.ndim == 2:
+            last_action = history.unsqueeze(1).expand(-1, num_samples, -1)
+        else:
+            return None
+
+        return self._to_env_action_units(last_action)
+
+    def get_cost(self, info_dict: dict, action_candidates: torch.Tensor):
+        history_action = info_dict.get("action")
+        if torch.is_tensor(history_action):
+            history_action = history_action.detach().clone()
+
+        cost = self.model.get_cost(info_dict, action_candidates)
+        if (
+            self.action_norm_weight == 0.0
+            and self.action_delta_weight == 0.0
+            and self.first_action_delta_weight == 0.0
+        ):
+            return cost
+
+        actions = self._to_env_action_units(action_candidates)
+        penalty = torch.zeros_like(cost)
+
+        if self.action_norm_weight != 0.0:
+            action_norm_sq = actions.pow(2).sum(dim=-1).mean(dim=-1)
+            penalty = penalty + self.action_norm_weight * action_norm_sq
+
+        if self.action_delta_weight != 0.0 and actions.size(2) > 1:
+            action_delta = actions[:, :, 1:] - actions[:, :, :-1]
+            action_delta_sq = action_delta.pow(2).sum(dim=-1).mean(dim=-1)
+            penalty = penalty + self.action_delta_weight * action_delta_sq
+
+        if self.first_action_delta_weight != 0.0:
+            last_action = self._last_history_action(
+                history_action,
+                actions.size(1),
+                actions.device,
+            )
+            if last_action is not None:
+                first_delta = actions[:, :, 0] - last_action
+                first_delta_sq = first_delta.pow(2).sum(dim=-1)
+                penalty = penalty + self.first_action_delta_weight * first_delta_sq
+
+        return cost + penalty
+
+
+class ActionClippedCEMSolver:
+    """CEM wrapper that optimizes only valid actions in model action units."""
+
+    def __init__(
+        self,
+        base_solver,
+        action_processor=None,
+        first_action_delta_limit=None,
+        action_delta_limit=None,
+    ):
+        self.base_solver = base_solver
+        self.action_processor = action_processor
+        self.first_action_delta_limit = first_action_delta_limit
+        self.action_delta_limit = action_delta_limit
+        self._candidate_low = None
+        self._candidate_high = None
+
+    def configure(self, *, action_space, n_envs, config) -> None:
+        self.base_solver.configure(
+            action_space=action_space,
+            n_envs=n_envs,
+            config=config,
+        )
+        low = np.asarray(action_space.low, dtype=np.float32).reshape(n_envs, -1)
+        high = np.asarray(action_space.high, dtype=np.float32).reshape(n_envs, -1)
+
+        if self.action_processor is not None:
+            low = self.action_processor.transform(low)
+            high = self.action_processor.transform(high)
+
+        low, high = np.minimum(low, high), np.maximum(low, high)
+        action_block = int(getattr(config, "action_block", 1))
+        if action_block > 1:
+            low = np.repeat(low, action_block, axis=1)
+            high = np.repeat(high, action_block, axis=1)
+
+        self._candidate_low = torch.as_tensor(low, dtype=torch.float32)
+        self._candidate_high = torch.as_tensor(high, dtype=torch.float32)
+
+    @property
+    def n_envs(self):
+        return self.base_solver.n_envs
+
+    @property
+    def action_dim(self):
+        return self.base_solver.action_dim
+
+    @property
+    def horizon(self):
+        return self.base_solver.horizon
+
+    def __call__(self, *args, **kwargs):
+        return self.solve(*args, **kwargs)
+
+    def _clip_candidates(self, candidates, start_idx=0, end_idx=None):
+        if self._candidate_low is None or self._candidate_high is None:
+            return candidates
+        end_idx = end_idx if end_idx is not None else start_idx + candidates.size(0)
+        low = self._candidate_low[start_idx:end_idx].to(candidates.device)
+        high = self._candidate_high[start_idx:end_idx].to(candidates.device)
+        return torch.clamp(candidates, low[:, None, None, :], high[:, None, None, :])
+
+    def _delta_limit_in_model_units(self, limit_value, action_dim, *, dtype, device):
+        if limit_value is None:
+            return None
+
+        limit = float(limit_value)
+        if limit <= 0.0:
+            return None
+
+        delta_limit = torch.full((action_dim,), limit, dtype=dtype, device=device)
+        if self.action_processor is None:
+            return delta_limit
+
+        scale = getattr(self.action_processor, "scale_", None)
+        if scale is None:
+            return delta_limit
+
+        scale = torch.as_tensor(scale, dtype=dtype, device=device).clamp_min(1e-6)
+        if scale.numel() != action_dim:
+            if action_dim % scale.numel() != 0:
+                return delta_limit
+            scale = scale.repeat(action_dim // scale.numel())
+        return delta_limit / scale
+
+    def _last_history_action(self, info_dict, start_idx, end_idx, *, device):
+        history = info_dict.get("action")
+        if history is None:
+            return None
+        if isinstance(history, np.ndarray):
+            history = torch.as_tensor(history)
+        if not torch.is_tensor(history):
+            return None
+
+        history = history[start_idx:end_idx].to(device)
+        if history.ndim == 4:
+            history = history[:, 0]
+        if history.ndim == 3:
+            return history[:, -1, :]
+        if history.ndim == 2:
+            return history
+        return None
+
+    def _limit_first_action_delta(self, candidates, last_action):
+        limit = self._delta_limit_in_model_units(
+            self.first_action_delta_limit,
+            candidates.size(-1),
+            dtype=candidates.dtype,
+            device=candidates.device,
+        )
+        if limit is None or last_action is None:
+            return candidates
+
+        if last_action.size(-1) != candidates.size(-1):
+            if candidates.size(-1) % last_action.size(-1) != 0:
+                return candidates
+            last_action = last_action.repeat(1, candidates.size(-1) // last_action.size(-1))
+
+        low = last_action[:, None, :] - limit.view(1, 1, -1)
+        high = last_action[:, None, :] + limit.view(1, 1, -1)
+        candidates[:, :, 0, :] = torch.clamp(candidates[:, :, 0, :], low, high)
+        return candidates
+
+    def _limit_action_deltas(self, candidates, last_action):
+        limit = self._delta_limit_in_model_units(
+            self.action_delta_limit,
+            candidates.size(-1),
+            dtype=candidates.dtype,
+            device=candidates.device,
+        )
+        if limit is None or last_action is None:
+            return candidates
+
+        if last_action.size(-1) != candidates.size(-1):
+            if candidates.size(-1) % last_action.size(-1) != 0:
+                return candidates
+            last_action = last_action.repeat(
+                1,
+                candidates.size(-1) // last_action.size(-1),
+            )
+
+        prev = last_action[:, None, :]
+        limit = limit.view(1, 1, -1)
+        for t in range(candidates.size(2)):
+            candidates[:, :, t, :] = torch.clamp(
+                candidates[:, :, t, :],
+                prev - limit,
+                prev + limit,
+            )
+            prev = candidates[:, :, t, :]
+        return candidates
+
+    @torch.inference_mode()
+    def solve(self, info_dict: dict, init_action: torch.Tensor | None = None) -> dict:
+        start_time = time.time()
+        solver = self.base_solver
+        outputs = {"costs": [], "mean": [], "var": []}
+
+        mean, var = solver.init_action_distrib(init_action)
+        mean = mean.to(solver.device)
+        var = var.to(solver.device)
+        mean = self._clip_candidates(mean.unsqueeze(1)).squeeze(1)
+
+        total_envs = solver.n_envs
+        for start_idx in range(0, total_envs, solver.batch_size):
+            end_idx = min(start_idx + solver.batch_size, total_envs)
+            current_bs = end_idx - start_idx
+            batch_mean = mean[start_idx:end_idx]
+            batch_var = var[start_idx:end_idx]
+            last_history_action = self._last_history_action(
+                info_dict,
+                start_idx,
+                end_idx,
+                device=solver.device,
+            )
+
+            expanded_infos = {}
+            for key, value in info_dict.items():
+                value_batch = value[start_idx:end_idx]
+                if torch.is_tensor(value):
+                    value_batch = value_batch.unsqueeze(1)
+                    value_batch = value_batch.expand(
+                        current_bs,
+                        solver.num_samples,
+                        *value_batch.shape[2:],
+                    )
+                elif isinstance(value, np.ndarray):
+                    value_batch = np.repeat(
+                        value_batch[:, None, ...],
+                        solver.num_samples,
+                        axis=1,
+                    )
+                expanded_infos[key] = value_batch
+
+            final_batch_cost = None
+            for _ in range(solver.n_steps):
+                candidates = torch.randn(
+                    current_bs,
+                    solver.num_samples,
+                    solver.horizon,
+                    solver.action_dim,
+                    generator=solver.torch_gen,
+                    device=solver.device,
+                )
+                candidates = (
+                    candidates * batch_var.unsqueeze(1)
+                    + batch_mean.unsqueeze(1)
+                )
+                candidates[:, 0] = batch_mean
+                candidates = self._clip_candidates(candidates, start_idx, end_idx)
+                candidates = self._limit_first_action_delta(
+                    candidates,
+                    last_history_action,
+                )
+                candidates = self._limit_action_deltas(
+                    candidates,
+                    last_history_action,
+                )
+
+                costs = solver.model.get_cost(expanded_infos.copy(), candidates)
+                if not isinstance(costs, torch.Tensor):
+                    raise AssertionError(
+                        f"Expected cost to be a torch.Tensor, got {type(costs)}"
+                    )
+                if costs.ndim != 2 or costs.shape != (
+                    current_bs,
+                    solver.num_samples,
+                ):
+                    raise AssertionError(
+                        "Expected cost shape "
+                        f"({current_bs}, {solver.num_samples}), got {costs.shape}"
+                    )
+
+                topk_vals, topk_inds = torch.topk(
+                    costs,
+                    k=solver.topk,
+                    dim=1,
+                    largest=False,
+                )
+                batch_indices = torch.arange(
+                    current_bs,
+                    device=solver.device,
+                ).unsqueeze(1).expand(-1, solver.topk)
+                topk_candidates = candidates[batch_indices, topk_inds]
+                batch_mean = topk_candidates.mean(dim=1)
+                batch_var = topk_candidates.std(dim=1)
+                final_batch_cost = topk_vals.mean(dim=1).cpu().tolist()
+
+            mean[start_idx:end_idx] = batch_mean
+            var[start_idx:end_idx] = batch_var
+            outputs["costs"].extend(final_batch_cost)
+
+        outputs["actions"] = mean.detach().cpu()
+        outputs["mean"] = [mean.detach().cpu()]
+        outputs["var"] = [var.detach().cpu()]
+        print(f"CEM solve time: {time.time() - start_time:.4f} seconds")
+        return outputs
+
+
 def get_eval_pixels_gaussian_blur(eval_cfg):
     blur_cfg = eval_cfg.get("pixels_gaussian_blur", None)
     if blur_cfg is None or not blur_cfg.get("enabled", False):
@@ -120,11 +521,27 @@ def get_eval_pixels_gaussian_blur(eval_cfg):
 class ModalityDropoutWorldModelPolicy(swm.policy.WorldModelPolicy):
     """World-model policy that removes a modality so missing-modality fusion can mask it."""
 
-    def __init__(self, *args, drop_modalities=None, **kwargs):
+    def __init__(
+        self,
+        *args,
+        drop_modalities=None,
+        modality_substitution="impute",
+        execution_action_delta_limit=None,
+        execution_action_norm_limit=None,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self.drop_modalities = normalize_modalities_arg(drop_modalities)
+        self.modality_substitution = str(modality_substitution)
+        self.execution_action_delta_limit = execution_action_delta_limit
+        self.execution_action_norm_limit = execution_action_norm_limit
+        self.executed_actions = []
+        self.pre_limit_executed_actions = []
+        self.execution_action_limited = []
+        self.solver_costs = []
+        self._last_executed_action = None
 
-    def _resolve_drop_sources(self):
+    def _resolve_drop_sources(self, strict=True):
         if not self.drop_modalities:
             return []
 
@@ -141,6 +558,8 @@ class ModalityDropoutWorldModelPolicy(swm.policy.WorldModelPolicy):
             elif modality in modality_sources.values():
                 source = modality
             else:
+                if not strict:
+                    continue
                 raise ValueError(
                     f"Unknown modality '{modality}'. Available modalities: {known}."
                 )
@@ -194,18 +613,118 @@ class ModalityDropoutWorldModelPolicy(swm.policy.WorldModelPolicy):
 
         return pruned, encoder, original_primary_source
 
+    def _zero_selected_modalities(self, info_dict):
+        drop_sources = self._resolve_drop_sources(strict=False)
+        if not drop_sources:
+            return info_dict, None, None
+
+        zeroed = dict(info_dict)
+        for drop_source in drop_sources:
+            for key in (
+                drop_source,
+                "goal" if drop_source == "pixels" else f"goal_{drop_source}",
+            ):
+                value = zeroed.get(key)
+                if torch.is_tensor(value):
+                    zeroed[key] = torch.zeros_like(value)
+                elif isinstance(value, np.ndarray):
+                    zeroed[key] = np.zeros_like(value)
+
+        return zeroed, None, None
+
+    def _substitute_selected_modalities(self, info_dict):
+        if self.modality_substitution == "zero":
+            return self._zero_selected_modalities(info_dict)
+        return self._drop_selected_modalities(info_dict)
+
+    def _previous_action_from_info(self, info_dict, action_shape):
+        if self._last_executed_action is not None:
+            return self._last_executed_action
+
+        history = info_dict.get("action")
+        if history is None:
+            return np.zeros(action_shape, dtype=np.float32)
+
+        history = np.asarray(history, dtype=np.float32)
+        if history.ndim >= 3:
+            previous = history[:, -1, :]
+        elif history.ndim == 2:
+            previous = history
+        elif history.ndim == 1:
+            previous = history.reshape(1, -1)
+        else:
+            return np.zeros(action_shape, dtype=np.float32)
+
+        try:
+            return np.broadcast_to(previous, action_shape).copy()
+        except ValueError:
+            return np.zeros(action_shape, dtype=np.float32)
+
+    def _limit_executed_action_delta(self, action, raw_info_dict):
+        if self.execution_action_delta_limit is None:
+            return action, False
+
+        limit = float(self.execution_action_delta_limit)
+        if limit <= 0.0:
+            return action, False
+
+        previous = self._previous_action_from_info(raw_info_dict, action.shape)
+        limited = np.clip(action, previous - limit, previous + limit)
+
+        action_space = getattr(self.env, "action_space", None)
+        if action_space is not None:
+            low = np.asarray(action_space.low, dtype=np.float32)
+            high = np.asarray(action_space.high, dtype=np.float32)
+            limited = np.clip(limited, low, high)
+
+        changed = not np.allclose(action, limited)
+        return limited.astype(action.dtype, copy=False), changed
+
+    def _limit_executed_action_norm(self, action):
+        if self.execution_action_norm_limit is None:
+            return action, False
+
+        limit = float(self.execution_action_norm_limit)
+        if limit <= 0.0:
+            return action, False
+
+        norms = np.linalg.norm(action, axis=-1, keepdims=True)
+        scale = np.minimum(1.0, limit / np.maximum(norms, 1e-8))
+        limited = action * scale
+
+        action_space = getattr(self.env, "action_space", None)
+        if action_space is not None:
+            low = np.asarray(action_space.low, dtype=np.float32)
+            high = np.asarray(action_space.high, dtype=np.float32)
+            limited = np.clip(limited, low, high)
+
+        changed = not np.allclose(action, limited)
+        return limited.astype(action.dtype, copy=False), changed
+
+    def _limit_executed_action(self, action, raw_info_dict):
+        action, delta_changed = self._limit_executed_action_delta(
+            action,
+            raw_info_dict,
+        )
+        action, norm_changed = self._limit_executed_action_norm(action)
+        self.execution_action_limited.append(delta_changed or norm_changed)
+        return action
+
     def get_action(self, info_dict: dict, **kwargs):
         assert hasattr(self, "env"), "Environment not set for the policy"
         assert "goal" in info_dict, "'goal' must be provided in info_dict"
+        raw_info_dict = dict(info_dict)
 
         prepared_info = self._prepare_info(dict(info_dict))
         prepared_info, encoder, original_primary_source = (
-            self._drop_selected_modalities(prepared_info)
+            self._substitute_selected_modalities(prepared_info)
         )
 
         try:
             if len(self._action_buffer) == 0:
                 outputs = self.solver(prepared_info, init_action=self._next_init)
+                if "costs" in outputs:
+                    self.solver_costs.extend(outputs["costs"])
 
                 actions = outputs["actions"]
                 keep_horizon = self.cfg.receding_horizon
@@ -228,12 +747,16 @@ class ModalityDropoutWorldModelPolicy(swm.policy.WorldModelPolicy):
         if "action" in self.process:
             action = self.process["action"].inverse_transform(action)
 
+        self.pre_limit_executed_actions.append(action.copy())
+        action = self._limit_executed_action(action, raw_info_dict)
+        self.executed_actions.append(action.copy())
+        self._last_executed_action = action.copy()
         return action
 
     def prepare_eval_info(self, info_dict: dict):
         prepared_info = self._prepare_info(dict(info_dict))
         prepared_info, encoder, original_primary_source = (
-            self._drop_selected_modalities(prepared_info)
+            self._substitute_selected_modalities(prepared_info)
         )
         return prepared_info, encoder, original_primary_source
 
@@ -259,6 +782,40 @@ def img_transform(cfg):
             transforms.Normalize(**spt.data.dataset_stats.ImageNet),
         ]
     )
+
+
+def obs_encoder_eval_img_transform(cfg):
+    blur_cfg = get_eval_pixels_gaussian_blur(cfg.eval)
+    if blur_cfg is None:
+        return None
+
+    return transforms.Compose(
+        [
+            transforms.ToImage(),
+            transforms.ToDtype(torch.float32, scale=True),
+            EvalGaussianBlur(blur_cfg),
+        ]
+    )
+
+
+def build_eval_image_transform(cfg, model):
+    if not model_uses_obs_encoder(model):
+        image_transform = img_transform(cfg)
+        return {
+            "pixels": image_transform,
+            "goal": image_transform,
+        }
+
+    image_transform = obs_encoder_eval_img_transform(cfg)
+    if image_transform is None:
+        print("Using raw image observations; model obs encoder handles preprocessing.")
+        return {}
+
+    print("Applying eval pixel blur before model obs-encoder preprocessing.")
+    return {
+        "pixels": image_transform,
+        "goal": image_transform,
+    }
 
 
 def resolve_dataset_env_idx(dataset, cfg):
@@ -371,6 +928,126 @@ def _set_stacked_history_buffers(world, init_history):
             buffer.clear()
             for value in values[env_idx]:
                 buffer.append(deepcopy(value))
+
+
+def _collect_state_restore_metrics(world, current_step):
+    metrics = {}
+    qpos_errors = []
+    proprio_errors = []
+    mocap_hand_distances = []
+
+    for env_idx, env in enumerate(world.envs.unwrapped.envs):
+        env_unwrapped = env.unwrapped
+        metaworld_env = getattr(env_unwrapped, "metaworld_env", None)
+        if metaworld_env is None:
+            continue
+
+        inner = metaworld_env.unwrapped
+        data = inner.data
+        model = inner.model
+
+        if "qpos" in current_step:
+            expected_qpos = np.asarray(current_step["qpos"][env_idx]).reshape(-1)
+            actual_qpos = np.asarray(data.qpos).reshape(-1)
+            dim = min(expected_qpos.size, actual_qpos.size)
+            if dim:
+                qpos_errors.append(float(np.linalg.norm(actual_qpos[:dim] - expected_qpos[:dim])))
+
+        if "proprio" in current_step:
+            expected_proprio = np.asarray(current_step["proprio"][env_idx]).reshape(-1)
+            actual_proprio = np.asarray(data.qpos[:7]).reshape(-1)
+            dim = min(expected_proprio.size, actual_proprio.size)
+            if dim:
+                proprio_errors.append(
+                    float(np.linalg.norm(actual_proprio[:dim] - expected_proprio[:dim]))
+                )
+
+        try:
+            mocap_id = model.body_mocapid[data.body("mocap").id]
+            if mocap_id >= 0:
+                mocap_pos = np.asarray(data.mocap_pos[mocap_id]).reshape(-1)
+                hand_pos = np.asarray(inner.get_endeff_pos()).reshape(-1)
+                mocap_hand_distances.append(float(np.linalg.norm(mocap_pos - hand_pos)))
+        except Exception:
+            pass
+
+    def add_stats(prefix, values):
+        if not values:
+            return
+        arr = np.asarray(values, dtype=np.float32)
+        metrics[f"{prefix}_mean"] = float(arr.mean())
+        metrics[f"{prefix}_max"] = float(arr.max())
+
+    add_stats("state_restore_qpos_l2", qpos_errors)
+    add_stats("state_restore_proprio_l2", proprio_errors)
+    add_stats("state_restore_mocap_hand_l2", mocap_hand_distances)
+    return metrics
+
+
+def _successes_from_world(world):
+    if "success" in world.infos:
+        successes = np.asarray(world.infos["success"])
+        if successes.ndim > 1:
+            successes = successes.reshape(successes.shape[0], -1).any(axis=1)
+        return successes.astype(bool)
+    return np.asarray(world.terminateds, dtype=bool)
+
+
+def _add_policy_debug_metrics(results, policy, world):
+    actions = getattr(policy, "executed_actions", None)
+    if actions:
+        action_arr = np.asarray(actions, dtype=np.float32)
+        action_norms = np.linalg.norm(action_arr, axis=-1)
+        results["action_norm_mean"] = float(action_norms.mean())
+        results["action_norm_max"] = float(action_norms.max())
+        results["first_action_norm_mean"] = float(action_norms[0].mean())
+        results["first_action_norm_max"] = float(action_norms[0].max())
+
+        action_space = getattr(world, "action_space", None)
+        if action_space is not None:
+            low = np.asarray(action_space.low, dtype=np.float32)
+            high = np.asarray(action_space.high, dtype=np.float32)
+            bound = np.maximum(np.abs(low), np.abs(high))
+            while bound.ndim < action_arr.ndim:
+                bound = np.expand_dims(bound, axis=0)
+            bound = np.broadcast_to(bound, action_arr.shape)
+            valid_bound = bound > 0
+            saturated = np.zeros_like(action_arr, dtype=bool)
+            saturated[valid_bound] = (
+                np.abs(action_arr[valid_bound]) >= 0.95 * bound[valid_bound]
+            )
+            results["action_saturation_fraction"] = float(saturated.mean())
+
+        if action_arr.shape[0] > 1:
+            action_deltas = np.diff(action_arr, axis=0)
+            action_delta_norms = np.linalg.norm(action_deltas, axis=-1)
+            results["action_delta_norm_mean"] = float(action_delta_norms.mean())
+            results["action_delta_norm_max"] = float(action_delta_norms.max())
+
+        pre_limit_actions = getattr(policy, "pre_limit_executed_actions", None)
+        if pre_limit_actions:
+            pre_limit_arr = np.asarray(pre_limit_actions, dtype=np.float32)
+            pre_limit_norms = np.linalg.norm(pre_limit_arr, axis=-1)
+            results["pre_limit_action_norm_mean"] = float(pre_limit_norms.mean())
+            results["pre_limit_action_norm_max"] = float(pre_limit_norms.max())
+            first_delta = pre_limit_arr[0] - action_arr[0]
+            first_delta_norms = np.linalg.norm(first_delta, axis=-1)
+            results["first_action_execution_clip_delta_mean"] = float(
+                first_delta_norms.mean()
+            )
+            results["first_action_execution_clip_delta_max"] = float(
+                first_delta_norms.max()
+            )
+
+        limited = getattr(policy, "execution_action_limited", None)
+        if limited:
+            results["execution_action_limited_fraction"] = float(np.mean(limited))
+
+    costs = getattr(policy, "solver_costs", None)
+    if costs:
+        cost_arr = np.asarray(costs, dtype=np.float32)
+        results["plan_cost_mean"] = float(cost_arr.mean())
+        results["plan_cost_std"] = float(cost_arr.std())
 
 
 def _build_action_history(values, history_size):
@@ -552,6 +1229,13 @@ def evaluate_from_dataset_with_history(
                     prepared_args[args_name] = args_data.get("value")
             method(**prepared_args)
 
+    state_restore_metrics = _collect_state_restore_metrics(world, current_step)
+    if state_restore_metrics:
+        print(
+            "STATE_RESTORE_METRICS="
+            f"{json.dumps(_make_json_safe(state_restore_metrics), sort_keys=True)}"
+        )
+
     shape_prefix = world.infos["pixels"].shape[:2]
     if shape_prefix[1] != history_size:
         raise RuntimeError(
@@ -577,6 +1261,7 @@ def evaluate_from_dataset_with_history(
         "episode_successes": np.zeros(len(episodes_idx)),
         "seeds": seeds,
     }
+    results.update(state_restore_metrics)
 
     if target_frame_chunks:
         target_frames = np.stack(target_frame_chunks)
@@ -595,7 +1280,7 @@ def evaluate_from_dataset_with_history(
         world.infos.update(deepcopy(goal_step))
         world.step()
         current_successes = np.logical_or(
-            results["episode_successes"], world.terminateds
+            results["episode_successes"], _successes_from_world(world)
         )
         newly_solved = np.logical_and(~frozen_mask, current_successes)
         if np.any(newly_solved):
@@ -658,6 +1343,8 @@ def evaluate_from_dataset_with_history(
         assert np.unique(results["seeds"]).shape[0] == n_episodes, (
             "Some episode seeds are identical!"
         )
+
+    _add_policy_debug_metrics(results, getattr(world, "policy", None), world)
 
     return results
 
@@ -883,11 +1570,6 @@ def run(cfg: DictConfig):
     render_size = cfg.eval.get("render_size", cfg.eval.img_size)
     world = swm.World(**cfg.world, image_shape=(render_size, render_size))
 
-    transform = {
-        "pixels": img_transform(cfg),
-        "goal": img_transform(cfg),
-    }
-
     dataset = get_dataset(cfg, cfg.eval.dataset_name)
     stats_dataset = dataset  # get_dataset(cfg, cfg.dataset.stats)
     col_name = "episode_idx" if "episode_idx" in dataset.column_names else "ep_idx"
@@ -914,6 +1596,7 @@ def run(cfg: DictConfig):
     # -- run evaluation
     policy = cfg.get("policy", "random")
     drop_modalities = get_drop_modalities(cfg.eval)
+    modality_substitution = get_modality_substitution(cfg.eval)
 
     if policy != "random":
         model = swm.policy.AutoCostModel(cfg.policy)
@@ -922,7 +1605,36 @@ def run(cfg: DictConfig):
         model = model.eval()
         model.requires_grad_(False)
         model.interpolate_pos_encoding = True
-        if drop_modalities and not model_supports_missing_modalities(model):
+        action_cost_cfg = cfg.eval.get("action_cost", {})
+        action_norm_weight = float(action_cost_cfg.get("norm_weight", 0.0))
+        action_delta_weight = float(action_cost_cfg.get("delta_weight", 0.0))
+        first_action_delta_weight = float(
+            action_cost_cfg.get("first_delta_weight", 0.0)
+        )
+        if (
+            action_norm_weight != 0.0
+            or action_delta_weight != 0.0
+            or first_action_delta_weight != 0.0
+        ):
+            model = ActionRegularizedCostModel(
+                model,
+                action_processor=process.get("action"),
+                action_norm_weight=action_norm_weight,
+                action_delta_weight=action_delta_weight,
+                first_action_delta_weight=first_action_delta_weight,
+            )
+            print(
+                "Planning action regularization enabled: "
+                f"norm={action_norm_weight}, "
+                f"delta={action_delta_weight}, "
+                f"first_delta={first_action_delta_weight}."
+            )
+        transform = build_eval_image_transform(cfg, model)
+        if (
+            drop_modalities
+            and modality_substitution == "impute"
+            and not model_supports_missing_modalities(model)
+        ):
             raise ValueError(
                 "eval.drop_modality / eval.drop_modalities requires a model whose "
                 "fusion supports missing modalities. This checkpoint does not."
@@ -930,15 +1642,58 @@ def run(cfg: DictConfig):
         config = swm.PlanConfig(**cfg.plan_config)
         cfg.solver.device = device
         solver = hydra.utils.instantiate(cfg.solver, model=model)
+        if bool(cfg.eval.get("clamp_action_candidates", False)):
+            solver = ActionClippedCEMSolver(
+                solver,
+                action_processor=process.get("action"),
+                first_action_delta_limit=cfg.eval.get(
+                    "first_action_delta_limit",
+                    None,
+                ),
+                action_delta_limit=cfg.eval.get("action_delta_limit", None),
+            )
+            print("Clamping CEM candidates to the environment action bounds.")
+            if cfg.eval.get("first_action_delta_limit", None) is not None:
+                print(
+                    "Limiting first action delta to "
+                    f"{cfg.eval.first_action_delta_limit} in env action units."
+                )
+            if cfg.eval.get("action_delta_limit", None) is not None:
+                print(
+                    "Limiting all action deltas to "
+                    f"{cfg.eval.action_delta_limit} in env action units."
+                )
         policy = ModalityDropoutWorldModelPolicy(
             solver=solver,
             config=config,
             process=process,
             transform=transform,
             drop_modalities=drop_modalities,
+            modality_substitution=modality_substitution,
+            execution_action_delta_limit=cfg.eval.get(
+                "execution_action_delta_limit",
+                None,
+            ),
+            execution_action_norm_limit=cfg.eval.get(
+                "execution_action_norm_limit",
+                None,
+            ),
         )
+        if cfg.eval.get("execution_action_delta_limit", None) is not None:
+            print(
+                "Limiting executed action deltas to "
+                f"{cfg.eval.execution_action_delta_limit} in env action units."
+            )
+        if cfg.eval.get("execution_action_norm_limit", None) is not None:
+            print(
+                "Limiting executed action norm to "
+                f"{cfg.eval.execution_action_norm_limit} in env action units."
+            )
         if drop_modalities:
-            print(f"Dropping modalities {drop_modalities} during evaluation.")
+            if modality_substitution == "zero":
+                print(f"Zeroing modalities {drop_modalities} during evaluation.")
+            else:
+                print(f"Dropping modalities {drop_modalities} during evaluation.")
 
     else:
         policy = swm.policy.RandomPolicy()
@@ -948,10 +1703,20 @@ def run(cfg: DictConfig):
                 "selected policy is random."
             )
 
-    results_path = (
+    results_base_path = (
         Path(swm.data.utils.get_cache_dir(), cfg.policy).parent
         if cfg.policy != "random"
         else Path(__file__).parent
+    )
+    results_path = Path(cfg.output.filename)
+    if not results_path.is_absolute():
+        results_path = results_base_path / results_path
+
+    video_path = (
+        results_path.parent
+        / "videos"
+        / results_path.stem
+        / f"seed_{cfg.seed}"
     )
 
     # For multi-task SensorMetaWorld datasets, keep only episodes for the env
@@ -1006,7 +1771,7 @@ def run(cfg: DictConfig):
                 cfg.eval.get("callables"), resolve=True
             ),
             save_video=bool(cfg.eval.get("save_video", True)),
-            video_path=results_path,
+            video_path=video_path,
         )
         if cfg.get("policy", "random") != "random":
             metrics.update(compute_final_latent_distance_metrics(policy, world))
@@ -1015,7 +1780,6 @@ def run(cfg: DictConfig):
         print(metrics)
         print("METRICS_JSON=" + json.dumps(_make_json_safe(metrics), sort_keys=True))
 
-        results_path = results_path / cfg.output.filename
         results_path.parent.mkdir(parents=True, exist_ok=True)
 
         with results_path.open("a") as f:

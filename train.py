@@ -23,6 +23,14 @@ from multimodal import build_obs_encoder
 from utils import ModelObjectCallBack
 
 
+def latent_curvature_loss(emb: torch.Tensor) -> torch.Tensor:
+    """Penalize sharp bends in consecutive latent states."""
+    if emb.size(1) < 3:
+        return emb.new_zeros(())
+    curvature = emb[:, 2:] - 2.0 * emb[:, 1:-1] + emb[:, :-2]
+    return curvature.pow(2).mean()
+
+
 def lejepa_forward(self, batch, stage, cfg):
     """encode observations, predict next states, compute losses."""
 
@@ -30,6 +38,9 @@ def lejepa_forward(self, batch, stage, cfg):
     n_preds = cfg.wm.num_preds
     lambd = cfg.loss.sigreg.weight
     imputer_weight = cfg.loss.get("imputer", {}).get("weight", 0.0)
+    curvature_cfg = cfg.loss.get("curvature", {})
+    curvature_enabled = bool(curvature_cfg.get("enabled", False))
+    curvature_weight = float(curvature_cfg.get("weight", 0.0))
 
     # Replace NaN values with 0 (occurs at sequence boundaries)
     batch["action"] = torch.nan_to_num(batch["action"], 0.0)
@@ -50,10 +61,14 @@ def lejepa_forward(self, batch, stage, cfg):
     output["sigreg_loss"] = self.sigreg(emb.transpose(0, 1))
     if "imputer_recon_loss" not in output:
         output["imputer_recon_loss"] = output["pred_loss"].new_zeros(())
+    if curvature_enabled:
+        output["curvature_loss"] = latent_curvature_loss(emb)
     output["loss"] = (
         output["pred_loss"]
         + lambd * output["sigreg_loss"]
         + imputer_weight * output["imputer_recon_loss"]
+        + curvature_weight
+        * output.get("curvature_loss", output["pred_loss"].new_zeros(()))
     )
 
     losses_dict = {f"{stage}/{k}": v.detach() for k, v in output.items() if "loss" in k}

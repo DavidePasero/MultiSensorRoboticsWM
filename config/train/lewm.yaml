@@ -67,6 +67,9 @@ loss:
       num_proj: 1024
   imputer:
     weight: 0.05
+  curvature:
+    enabled: false
+    weight: 0.0
 
 grad_norm_logging:
   enabled: True

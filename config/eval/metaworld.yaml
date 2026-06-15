@@ -64,6 +64,16 @@ eval:
     sigma_max: 1.5
   drop_modality: null
   drop_modalities: []
+  modality_substitution: impute
+  clamp_action_candidates: false
+  first_action_delta_limit: null
+  action_delta_limit: null
+  execution_action_delta_limit: null
+  execution_action_norm_limit: null
+  action_cost:
+    norm_weight: 0.0
+    delta_weight: 0.0
+    first_delta_weight: 0.0
   dataset_name: metaworld_eval
   callables:
     - method: _set_state
