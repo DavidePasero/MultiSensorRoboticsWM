@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Run this from the Snellius login node:
-#   bash /home/dpasero/project_space/MultiSensorRoboticsWM/job_dir/run_planning_suite_snellius.sh
+#   bash /home/dpasero/MultiSensorRoboticsWM/job_dir/run_planning_suite_snellius.sh
 
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 PROJECT_DIR="${PROJECT_DIR:-$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd)}"
