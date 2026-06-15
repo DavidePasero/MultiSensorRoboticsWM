@@ -2,18 +2,22 @@
 set -euo pipefail
 
 # Run this from the Snellius login node:
-#   bash job_dir/run_planning_suite_snellius.sh
+#   bash /home/dpasero/project_space/MultiSensorRoboticsWM/job_dir/run_planning_suite_snellius.sh
 
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
-mkdir -p out_job_dir
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+PROJECT_DIR="${PROJECT_DIR:-$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd)}"
+cd "$PROJECT_DIR"
 
-RUNNER="${RUNNER:-job_dir/run_planning_snellius.sh}"
+RUNNER="${RUNNER:-$PROJECT_DIR/job_dir/run_planning_snellius.sh}"
 RUN_STAMP="${RUN_STAMP:-$(date +%Y%m%d_%H%M%S)}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-/home/dpasero/project_space/documentation/planning_corrected_eval70_${RUN_STAMP}}"
-MANIFEST="${MANIFEST:-out_job_dir/planning_suite_${RUN_STAMP}.tsv}"
+MANIFEST="${MANIFEST:-$PROJECT_DIR/out_job_dir/planning_suite_${RUN_STAMP}.tsv}"
+SLURM_LOG_DIR="${SLURM_LOG_DIR:-$PROJECT_DIR/out_job_dir}"
+SUBMIT_SUMMARY="${SUBMIT_SUMMARY:-$PROJECT_DIR/out_job_dir/planning_suite_${RUN_STAMP}_submission.txt}"
 MAX_ARRAY_PARALLEL="${MAX_ARRAY_PARALLEL:-8}"
 SEED_LIST="${SEED_LIST:-42 43 44}"
 
+COMMON_EVAL_NUM="${EVAL_NUM:-10}"
 COMMON_EVAL_BUDGET="${EVAL_BUDGET:-70}"
 COMMON_GOAL_OFFSET_STEPS="${GOAL_OFFSET_STEPS:-20}"
 COMMON_HORIZON="${HORIZON:-15}"
@@ -23,7 +27,7 @@ COMMON_CLAMP_ACTION_CANDIDATES="${CLAMP_ACTION_CANDIDATES:-false}"
 COMMON_CACHE_ALL_LOADED="${CACHE_ALL_LOADED:-true}"
 COMMON_SAVE_VIDEO="${SAVE_VIDEO:-true}"
 
-mkdir -p "$(dirname "$MANIFEST")"
+mkdir -p "$(dirname "$MANIFEST")" "$SLURM_LOG_DIR"
 : > "$MANIFEST"
 
 add_planning() {
@@ -51,10 +55,14 @@ add_planning() {
 }
 
 echo "Submitting corrected planning suite."
+echo "Project dir: $PROJECT_DIR"
+echo "Runner: $RUNNER"
 echo "Run stamp: $RUN_STAMP"
 echo "Output root: $OUTPUT_ROOT"
 echo "Manifest: $MANIFEST"
+echo "Slurm log dir: $SLURM_LOG_DIR"
 echo "Seeds: $SEED_LIST"
+echo "Eval episodes per seed: $COMMON_EVAL_NUM"
 echo "Eval budget: $COMMON_EVAL_BUDGET"
 echo "Warm start: $COMMON_WARM_START"
 echo "Action clamping: $COMMON_CLAMP_ACTION_CANDIDATES"
@@ -222,6 +230,7 @@ fi
 export PLANNING_MANIFEST="$MANIFEST"
 export OUTPUT_ROOT
 export SEED_LIST
+export EVAL_NUM="$COMMON_EVAL_NUM"
 export EVAL_BUDGET="$COMMON_EVAL_BUDGET"
 export GOAL_OFFSET_STEPS="$COMMON_GOAL_OFFSET_STEPS"
 export HORIZON="$COMMON_HORIZON"
@@ -243,7 +252,42 @@ export FIRST_ACTION_DELTA_WEIGHT="0.0"
 
 JOB_NAME="PLAN_SUITE_${RUN_STAMP}"
 JOB_NAME="${JOB_NAME:0:60}"
-JOB_ID="$(sbatch --parsable --array="$ARRAY_SPEC" --job-name "$JOB_NAME" --export=ALL "$RUNNER")"
+JOB_ID="$(
+  sbatch \
+    --parsable \
+    --array="$ARRAY_SPEC" \
+    --job-name "$JOB_NAME" \
+    --chdir="$PROJECT_DIR" \
+    --output="$SLURM_LOG_DIR/${JOB_NAME}_%A_%a.out" \
+    --error="$SLURM_LOG_DIR/${JOB_NAME}_%A_%a.out" \
+    --export=ALL \
+    "$RUNNER"
+)"
 
 echo "Wrote $NUM_JOBS planning configurations to $MANIFEST."
 echo "Submitted array job $JOB_ID with --array=$ARRAY_SPEC."
+
+cat > "$SUBMIT_SUMMARY" <<EOF
+Planning suite submission
+=========================
+job_id: $JOB_ID
+array_spec: $ARRAY_SPEC
+run_stamp: $RUN_STAMP
+output_root: $OUTPUT_ROOT
+manifest: $MANIFEST
+slurm_log_pattern: $SLURM_LOG_DIR/${JOB_NAME}_${JOB_ID}_<array_task_id>.out
+seeds: $SEED_LIST
+eval_num_per_seed: $COMMON_EVAL_NUM
+eval_budget: $COMMON_EVAL_BUDGET
+warm_start: $COMMON_WARM_START
+action_clamping: $COMMON_CLAMP_ACTION_CANDIDATES
+save_video: $COMMON_SAVE_VIDEO
+
+Useful commands:
+  sacct -j $JOB_ID --format=JobID,JobName%35,State,ExitCode,Elapsed -X
+  ls -ltr $SLURM_LOG_DIR/${JOB_NAME}_${JOB_ID}_*.out
+  nl -ba $MANIFEST
+  find $OUTPUT_ROOT -maxdepth 3 -type f | sort
+EOF
+
+echo "Submission summary: $SUBMIT_SUMMARY"

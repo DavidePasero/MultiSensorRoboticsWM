@@ -19,12 +19,12 @@ export PYOPENGL_PLATFORM=egl
 export PYTHONUNBUFFERED=1
 export STABLEWM_HOME="${STABLEWM_HOME:-/home/dpasero/project_space}"
 
-if [[ -f eval.py ]]; then
-  :
-elif [[ -f MultiSensorRoboticsWM/eval.py ]]; then
-  cd MultiSensorRoboticsWM/
-else
-  echo "Could not find MultiSensorRoboticsWM/eval.py from $(pwd)." >&2
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+PROJECT_DIR="${PROJECT_DIR:-$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd)}"
+cd "$PROJECT_DIR"
+
+if [[ ! -f eval.py ]]; then
+  echo "Could not find eval.py in PROJECT_DIR=$PROJECT_DIR." >&2
   exit 1
 fi
 source .venv/bin/activate
