@@ -1,5 +1,6 @@
 import os
 import json
+import inspect
 from collections import OrderedDict, defaultdict
 from copy import deepcopy
 
@@ -1227,6 +1228,54 @@ def evaluate_from_dataset_with_history(
                     prepared_args[args_name] = deepcopy(callable_data[value][env_idx])
                 else:
                     prepared_args[args_name] = args_data.get("value")
+
+            try:
+                signature = inspect.signature(method)
+                accepts_kwargs = any(
+                    parameter.kind == inspect.Parameter.VAR_KEYWORD
+                    for parameter in signature.parameters.values()
+                )
+                if not accepts_kwargs:
+                    allowed_args = set(signature.parameters)
+                    if (
+                        method_name == "_set_goal_state"
+                        and "target_pos" in prepared_args
+                        and "target_pos" not in allowed_args
+                        and "goal_state" in allowed_args
+                    ):
+                        prepared_args["goal_state"] = prepared_args.pop("target_pos")
+
+                    dropped_args = sorted(set(prepared_args) - allowed_args)
+                    if dropped_args:
+                        print(
+                            f"Callable {method_name} does not accept {dropped_args}; "
+                            "dropping those restore args."
+                        )
+                    prepared_args = {
+                        key: value
+                        for key, value in prepared_args.items()
+                        if key in allowed_args
+                    }
+
+                    missing_required = [
+                        name
+                        for name, parameter in signature.parameters.items()
+                        if parameter.default is inspect.Parameter.empty
+                        and parameter.kind
+                        in (
+                            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                            inspect.Parameter.KEYWORD_ONLY,
+                        )
+                        and name not in prepared_args
+                    ]
+                    if missing_required:
+                        print(
+                            f"Callable {method_name} is missing required args "
+                            f"{missing_required}; skipping callable."
+                        )
+                        continue
+            except (TypeError, ValueError):
+                pass
             method(**prepared_args)
 
     state_restore_metrics = _collect_state_restore_metrics(world, current_step)

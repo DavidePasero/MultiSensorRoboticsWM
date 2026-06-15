@@ -14,7 +14,8 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-/home/dpasero/project_space/documentation/planning_c
 MANIFEST="${MANIFEST:-$PROJECT_DIR/out_job_dir/planning_suite_${RUN_STAMP}.tsv}"
 SLURM_LOG_DIR="${SLURM_LOG_DIR:-$PROJECT_DIR/out_job_dir}"
 SUBMIT_SUMMARY="${SUBMIT_SUMMARY:-$PROJECT_DIR/out_job_dir/planning_suite_${RUN_STAMP}_submission.txt}"
-MAX_ARRAY_PARALLEL="${MAX_ARRAY_PARALLEL:-8}"
+MAX_ARRAY_PARALLEL="${MAX_ARRAY_PARALLEL:-5}"
+ARRAY_TASKS="${ARRAY_TASKS:-}"
 SEED_LIST="${SEED_LIST:-42 43 44}"
 
 COMMON_EVAL_NUM="${EVAL_NUM:-10}"
@@ -69,6 +70,9 @@ echo "Eval budget: $COMMON_EVAL_BUDGET"
 echo "Warm start: $COMMON_WARM_START"
 echo "Action clamping: $COMMON_CLAMP_ACTION_CANDIDATES"
 echo "Max concurrent array tasks: $MAX_ARRAY_PARALLEL"
+if [[ -n "$ARRAY_TASKS" ]]; then
+  echo "Submitting only array tasks: $ARRAY_TASKS"
+fi
 echo ""
 
 # ---------------------------------------------------------------------------
@@ -183,6 +187,17 @@ do
   read -r blur_name blur_kernel blur_sigma <<< "$blur_level"
 
   add_planning \
+    "blur_button_press_${blur_name}_pixels" \
+    "metaworld_pixels_blur_button_press" \
+    "metaworld_eval_button_press" \
+    "button-press-v3" \
+    "all" \
+    "impute" \
+    "true" \
+    "$blur_kernel" \
+    "$blur_sigma"
+
+  add_planning \
     "blur_button_press_${blur_name}_latent_reconstruction" \
     "metaworld_selfattention_latent_reconstruction_blur_button_press" \
     "metaworld_eval_button_press" \
@@ -216,6 +231,40 @@ do
     "$blur_sigma"
 done
 
+# ---------------------------------------------------------------------------
+# Normal planning: bin-picking. Kept last so it can be resumed as a partial
+# array without disturbing already completed button/drawer/masked/blur jobs.
+# ---------------------------------------------------------------------------
+add_planning \
+  "normal_bin_picking_pixels" \
+  "metaworld_pixels_bin_picking" \
+  "metaworld_eval_bin_picking" \
+  "bin-picking-v3"
+
+add_planning \
+  "normal_bin_picking_selfattention" \
+  "metaworld_selfattention_bin_picking" \
+  "metaworld_eval_bin_picking" \
+  "bin-picking-v3"
+
+add_planning \
+  "normal_bin_picking_gated" \
+  "metaworld_gated_bin_picking" \
+  "metaworld_eval_bin_picking" \
+  "bin-picking-v3"
+
+add_planning \
+  "normal_bin_picking_coproj" \
+  "metaworld_coproj_bin_picking" \
+  "metaworld_eval_bin_picking" \
+  "bin-picking-v3"
+
+add_planning \
+  "normal_bin_picking_random" \
+  "random" \
+  "metaworld_eval_bin_picking" \
+  "bin-picking-v3"
+
 echo ""
 NUM_JOBS="$(wc -l < "$MANIFEST")"
 NUM_JOBS="${NUM_JOBS//[[:space:]]/}"
@@ -224,7 +273,7 @@ if [[ "$NUM_JOBS" -lt 1 ]]; then
   exit 1
 fi
 
-ARRAY_SPEC="1-${NUM_JOBS}"
+ARRAY_SPEC="${ARRAY_TASKS:-1-${NUM_JOBS}}"
 if [[ -n "$MAX_ARRAY_PARALLEL" && "$MAX_ARRAY_PARALLEL" != "0" ]]; then
   ARRAY_SPEC="${ARRAY_SPEC}%${MAX_ARRAY_PARALLEL}"
 fi
