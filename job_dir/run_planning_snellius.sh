@@ -19,8 +19,14 @@ export PYOPENGL_PLATFORM=egl
 export PYTHONUNBUFFERED=1
 export STABLEWM_HOME="${STABLEWM_HOME:-/home/dpasero/project_space}"
 
-SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
-PROJECT_DIR="${PROJECT_DIR:-$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd)}"
+if [[ -z "${PROJECT_DIR:-}" ]]; then
+  if [[ -f /home/dpasero/MultiSensorRoboticsWM/eval.py ]]; then
+    PROJECT_DIR="/home/dpasero/MultiSensorRoboticsWM"
+  else
+    SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+    PROJECT_DIR="$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd)"
+  fi
+fi
 cd "$PROJECT_DIR"
 
 if [[ ! -f eval.py ]]; then
