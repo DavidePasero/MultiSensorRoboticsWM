@@ -6,7 +6,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --time=06:00:00
-#SBATCH --output=out_job_dir/PLANNING_%A.out
+#SBATCH --output=out_job_dir/PLANNING_%A_%a.out
 
 set -euo pipefail
 
@@ -19,13 +19,20 @@ export PYOPENGL_PLATFORM=egl
 export PYTHONUNBUFFERED=1
 export STABLEWM_HOME="${STABLEWM_HOME:-/home/dpasero/project_space}"
 
-cd MultiSensorRoboticsWM/
+if [[ -f eval.py ]]; then
+  :
+elif [[ -f MultiSensorRoboticsWM/eval.py ]]; then
+  cd MultiSensorRoboticsWM/
+else
+  echo "Could not find MultiSensorRoboticsWM/eval.py from $(pwd)." >&2
+  exit 1
+fi
 source .venv/bin/activate
 
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-manual_planning}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$STABLEWM_HOME/documentation/planning_corrected_eval70}"
+OUTPUT_DIR_EXPLICIT="${OUTPUT_DIR+x}"
 OUTPUT_DIR="${OUTPUT_DIR:-$OUTPUT_ROOT/$EXPERIMENT_NAME}"
-mkdir -p "$OUTPUT_DIR"
 
 MODEL_RUN="${MODEL_RUN:-random}"
 DATASET_NAME="${DATASET_NAME:-metaworld_eval_button_press}"
@@ -67,6 +74,45 @@ BLUR_PROBABILITY="${BLUR_PROBABILITY:-1.0}"
 BLUR_KERNEL_SIZE="${BLUR_KERNEL_SIZE:-5}"
 BLUR_SIGMA_MIN="${BLUR_SIGMA_MIN:-1.0}"
 BLUR_SIGMA_MAX="${BLUR_SIGMA_MAX:-1.0}"
+
+if [[ -n "${PLANNING_MANIFEST:-}" ]]; then
+  if [[ -z "${SLURM_ARRAY_TASK_ID:-}" ]]; then
+    echo "PLANNING_MANIFEST is set, but SLURM_ARRAY_TASK_ID is empty." >&2
+    exit 1
+  fi
+  if [[ ! -f "$PLANNING_MANIFEST" ]]; then
+    echo "Planning manifest not found: $PLANNING_MANIFEST" >&2
+    exit 1
+  fi
+
+  manifest_line="$(sed -n "${SLURM_ARRAY_TASK_ID}p" "$PLANNING_MANIFEST")"
+  if [[ -z "$manifest_line" ]]; then
+    echo "No manifest entry for SLURM_ARRAY_TASK_ID=$SLURM_ARRAY_TASK_ID." >&2
+    exit 1
+  fi
+
+  IFS=$'\t' read -r \
+    EXPERIMENT_NAME \
+    MODEL_RUN \
+    DATASET_NAME \
+    TASK_LIST \
+    KEEP_MODALITIES_CSV \
+    MODALITY_SUBSTITUTION \
+    BLUR \
+    BLUR_KERNEL_SIZE \
+    BLUR_SIGMA \
+    <<< "$manifest_line"
+
+  BLUR_SIGMA_MIN="$BLUR_SIGMA"
+  BLUR_SIGMA_MAX="$BLUR_SIGMA"
+  if [[ -z "$OUTPUT_DIR_EXPLICIT" ]]; then
+    OUTPUT_DIR="$OUTPUT_ROOT/$EXPERIMENT_NAME"
+  fi
+
+  echo "Loaded planning manifest entry $SLURM_ARRAY_TASK_ID from $PLANNING_MANIFEST"
+fi
+
+mkdir -p "$OUTPUT_DIR"
 
 ALL_MODALITIES=(
   "pixels"
